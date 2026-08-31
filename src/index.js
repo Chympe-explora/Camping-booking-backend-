@@ -34,7 +34,7 @@
  *                             for the bot's "preview" links)
  */
 
-import { json, corsHeaders, handleVisit, handleTap, handleDraft, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
+import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
 import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
 
@@ -51,6 +51,7 @@ export default {
       if (url.pathname === "/api/visit" && request.method === "POST") return handleVisit(request, env);
       if (url.pathname === "/api/tap" && request.method === "POST") return handleTap(request, env);
       if (url.pathname === "/api/draft" && request.method === "POST") return handleDraft(request, env);
+      if (url.pathname === "/api/paynow" && request.method === "POST") return handlePayNow(request, env);
       if (url.pathname === "/api/receipt" && request.method === "POST") return handleReceipt(request, env);
       if (url.pathname === "/api/submit" && request.method === "POST") return handleSubmit(request, env);
       if (url.pathname.startsWith("/api/status/") && request.method === "GET") {

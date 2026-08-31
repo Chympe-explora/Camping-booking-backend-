@@ -139,6 +139,19 @@ export async function handleDraft(request, env) {
   return json({ ok: true }, env);
 }
 
+// Fired the moment a visitor taps "Pay Now" (before they've paid or
+// submitted anything). Sends a brand-new, distinct Telegram message with
+// every detail collected so far, so the admin sees it immediately —
+// separate from the live-editing draft message so neither gets overwritten.
+export async function handlePayNow(request, env) {
+  const { sessionId, siteId, data } = await request.json();
+  const text =
+    `\ud83d\udcb3 <b>Pay Now tapped — ${escapeHtml(siteId || "site")}</b>\n${fmtData(data)}\n\n` +
+    `<i>session: ${escapeHtml(sessionId || "")}</i>`;
+  const res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text });
+  return json({ ok: !!res.ok, error: res.ok ? undefined : (res.description || "telegram send failed") }, env, res.ok ? 200 : 502);
+}
+
 export async function handleReceipt(request, env) {
   const form = await request.formData();
   const sessionId = form.get("sessionId");
@@ -148,7 +161,7 @@ export async function handleReceipt(request, env) {
   if (!file) return json({ ok: false, error: "no file" }, env, 400);
 
   const res = await tgSendPhotoOrDoc(env, { caption: `\ud83e\uddfe Receipt — ${siteId || "site"}\n${caption}\nsession: ${sessionId}` }, file);
-  return json({ ok: !!res.ok }, env);
+  return json({ ok: !!res.ok, error: res.ok ? undefined : (res.description || "telegram send failed") }, env, res.ok ? 200 : 502);
 }
 
 // A submitted booking gets its own bookingId (used by the browser to poll
@@ -172,9 +185,20 @@ export async function handleSubmit(request, env) {
     },
   });
 
+  // IMPORTANT: only report success to the visitor's browser if the
+  // booking message actually reached Telegram. Previously this always
+  // returned { ok: true }, even when the send failed (bad/missing bot
+  // token, wrong chat id, bot never started, etc.) — so a visitor could
+  // "successfully" submit a booking that the admin never saw, with no
+  // error anywhere. Now a failed send is reported back as an error so it
+  // can be surfaced in the UI instead of disappearing silently.
+  if (!res.ok) {
+    return json({ ok: false, error: res.description || "telegram send failed" }, env, 502);
+  }
+
   await env.BOOKINGS.put(`status:${bookingId}`, "pending", { expirationTtl: 60 * 60 * 24 * 30 });
   await env.BOOKINGS.put(`booking:${bookingId}`, JSON.stringify({ sessionId, siteId, data }), { expirationTtl: 60 * 60 * 24 * 30 });
-  if (res.ok && res.result && res.result.message_id) {
+  if (res.result && res.result.message_id) {
     await env.BOOKINGS.put(`bookingmsg:${bookingId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 * 30 });
   }
 
