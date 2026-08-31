@@ -5,7 +5,7 @@
  */
 
 import { SCHEMA_DEFAULTS } from "./content-schema.js";
-import { isValidSite, getDoc, deepMerge } from "./store.js";
+import { isValidSite, getDoc, saveDoc, deepMerge } from "./store.js";
 import { calculatePrice, DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tgResolveFileUrl } from "./telegram.js";
 import { json, corsHeaders } from "./booking.js";
@@ -63,6 +63,48 @@ export async function handleGetHighlights(url, env) {
 export async function handleGetDiscounts(env) {
   const override = await getDoc(env, "discounts:global", {});
   return json({ ok: true, discounts: deepMerge(DEFAULT_DISCOUNTS, override) }, env);
+}
+
+// POST /api/admin/reset-images  { site, keys: ["logo", "expeditionPackageCard"] }
+// Header: x-admin-secret: <ADMIN_API_SECRET>
+//
+// Same effect as tapping "↩️ Reset this one to default" on the Telegram
+// admin bot, but callable over HTTP — for fixing a stale/broken photo
+// override without going through the bot's menus. Clears only the
+// named keys from the images:<site> doc (leaving every other
+// admin-uploaded photo untouched) so the site falls back to whatever
+// is currently the static default (config.js / SCHEMA_DEFAULTS) for
+// those keys.
+export async function handleAdminResetImages(request, env) {
+  if (!env.ADMIN_API_SECRET) {
+    return json({ ok: false, error: "ADMIN_API_SECRET is not configured on this Worker" }, env, 500);
+  }
+  const secret = request.headers.get("x-admin-secret");
+  if (secret !== env.ADMIN_API_SECRET) {
+    return json({ ok: false, error: "forbidden" }, env, 403);
+  }
+
+  const { site, keys } = await request.json();
+  if (!isValidSite(site) || !Array.isArray(keys) || !keys.length) {
+    return json({ ok: false, error: "site and keys[] are required" }, env, 400);
+  }
+
+  const docKey = `images:${site}`;
+  const override = await getDoc(env, docKey, {});
+  const removed = [];
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(override, key)) {
+      delete override[key];
+      removed.push(key);
+    }
+  }
+  await saveDoc(env, docKey, override, {
+    logChange: removed.length
+      ? `Reset photo(s) to default via admin API: ${removed.join(", ")}`
+      : "Admin API reset requested — nothing was overridden",
+  });
+
+  return json({ ok: true, removed }, env);
 }
 
 export async function handleCalculatePrice(request, env) {

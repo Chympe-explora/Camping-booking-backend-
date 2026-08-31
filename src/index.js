@@ -32,10 +32,18 @@
  *                             testing, then lock it down — see DEPLOY.md)
  *   SITE_BASE_URL           - e.g. https://your-site.pages.dev (used only
  *                             for the bot's "preview" links)
+ *   ADMIN_API_SECRET        - random string; required by
+ *                             POST /api/admin/reset-images (send it as
+ *                             the x-admin-secret header). Lets you clear
+ *                             a stale/broken photo override over HTTP —
+ *                             the same effect as the bot's "Reset this
+ *                             one to default" button — without opening
+ *                             Telegram. Set with:
+ *                               wrangler secret put ADMIN_API_SECRET
  */
 
 import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
-import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia } from "./content-api.js";
+import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleAdminResetImages } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
 
 export default {
@@ -67,6 +75,7 @@ export default {
       if (url.pathname === "/api/highlights" && request.method === "GET") return handleGetHighlights(url, env);
       if (url.pathname === "/api/discounts" && request.method === "GET") return handleGetDiscounts(env);
       if (url.pathname === "/api/calculate-price" && request.method === "POST") return handleCalculatePrice(request, env);
+      if (url.pathname === "/api/admin/reset-images" && request.method === "POST") return handleAdminResetImages(request, env);
       if (url.pathname.startsWith("/media/") && request.method === "GET") return handleMedia(url, env);
 
       // ---- one shared Telegram webhook ----
