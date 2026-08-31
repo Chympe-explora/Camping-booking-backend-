@@ -1,0 +1,23 @@
+name = "chympe-booking-backend"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Create this KV namespace with:
+#   wrangler kv namespace create BOOKINGS
+# then paste the id it prints below. (Same namespace as before — it now
+# also caches content/prices/discounts, on top of bookings.)
+kv_namespaces = [
+  { binding = "BOOKINGS", id = "cd92b965c0ed4581bebe2cb0b941d9cb" }
+]
+
+# Non-secret vars. Secrets (bot token, chat ids, webhook secret) are set
+# separately in the Cloudflare dashboard (Settings > Variables and Secrets)
+# and are not touched by this file.
+[vars]
+ALLOWED_ORIGIN = "*"
+# Comma-separated Telegram numeric user ids allowed to drive the admin
+# bot.
+ADMIN_USER_IDS = "8550710288"
+# Used only for the bot's "👁️ Preview" links. Update this later once
+# the static site has a real Pages URL.
+SITE_BASE_URL = "https://your-site.pages.dev"
