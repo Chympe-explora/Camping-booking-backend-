@@ -28,12 +28,26 @@ export async function handleGetPrices(url, env) {
 
 // Only returns keys the admin has actually changed via the bot — the
 // site keeps using its own local static image for everything else.
+//
+// Defensive guard: an older version of the admin bot could accidentally
+// save the *entire* default image map (filenames like "hero-bg-2.jpg",
+// not real Telegram file_ids) into this doc instead of just the one
+// photo that was actually changed (see saveLeaf in telegram-bot.js).
+// That "poisoned" every image on the site, because /media/:site/:key
+// would then try to resolve a plain filename as if it were a Telegram
+// file_id and always 404. We now skip any key whose stored value is
+// still just the untouched default filename — only genuine overrides
+// ever get turned into a /media link. This makes any already-poisoned
+// KV doc self-heal on the very next page load, no manual reset needed.
 export async function handleGetImages(url, env) {
   const site = url.searchParams.get("site");
   if (!isValidSite(site)) return json({ ok: false, error: "bad site" }, env, 400);
   const override = await getDoc(env, `images:${site}`, {});
+  const defaults = SCHEMA_DEFAULTS[site]?.KC_IMAGES || {};
   const urls = {};
   for (const key of Object.keys(override)) {
+    const value = override[key];
+    if (!value || typeof value !== "string" || value === defaults[key]) continue;
     urls[key] = `/media/${site}/${key}`;
   }
   return json({ ok: true, images: urls }, env);
@@ -82,7 +96,12 @@ export async function handleMedia(url, env) {
 
   const override = await getDoc(env, `images:${site}`, {});
   const fileId = override[key];
-  if (!fileId) return new Response("not found", { status: 404 });
+  const defaults = SCHEMA_DEFAULTS[site]?.KC_IMAGES || {};
+  // Same guard as handleGetImages: never try to resolve a plain default
+  // filename (not a real Telegram file_id) through the Telegram API.
+  if (!fileId || typeof fileId !== "string" || fileId === defaults[key]) {
+    return new Response("not found", { status: 404 });
+  }
 
   const fileUrl = await tgResolveFileUrl(env, fileId);
   if (!fileUrl) return new Response("not found", { status: 404 });

@@ -22,7 +22,7 @@
  * One shared webhook, routed by which chat the tap came from:
  *   POST /telegram-webhook
  *     -> admin chat (TELEGRAM_ADMIN_CHAT_ID)   => the button-driven admin bot
- *     -> booking chat (TELEGRAM_CHAT_ID)       => Confirm/Cancel a booking (unchanged)
+ *     -> booking chat (TELEGRAM_CHAT_ID)       => Confirm/Reject a booking
  *
  * Required secrets/vars beyond the original booking backend — see
  * DEPLOY.md:

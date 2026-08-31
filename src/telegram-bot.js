@@ -16,6 +16,7 @@ import { SITES, SITE_LABELS, getDoc, saveDoc, deepMerge, getPath, setPath, getSe
 import { listChildren, humanize, chunk } from "./walker.js";
 import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
+import { getLiveStats, resetStats } from "./stats.js";
 
 const CATEGORIES = [
   { kind: "content", label: "✏️ Edit Website Text", perSite: true },
@@ -71,10 +72,21 @@ export async function handleTelegramAdminUpdate(env, update) {
 async function sendMainMenu(env, chatId, note) {
   const rows = CATEGORIES.map((c) => [btn(c.label, `pick:${c.kind}`)]);
   rows.push([btn("👁️ Preview Live Sites", "preview")]);
+  rows.push([btn("📊 Live Stats", "stats")]);
   const text =
     (note ? note + "\n\n" : "") +
     "👑 <b>Website Admin</b>\nWhat do you want to do?";
   await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+async function sendStatsMenu(env, chatId) {
+  const { visitors, bookings } = await getLiveStats(env);
+  const text =
+    `📊 <b>Live Stats</b>\n👀 Visitors: <b>${visitors}</b>\n✅ Confirmed bookings: <b>${bookings}</b>\n\n` +
+    `This is also kept as a pinned message at the top of this chat, updating automatically as visits and confirmations come in.`;
+  await tgSendMessage(env, chatId, text, {
+    reply_markup: kb([[btn("🔄 Reset counters to 0", "resetstats")], [btn("⬅️ Main Menu", "home")]]),
+  });
 }
 
 // ---------------- CALLBACK ROUTER ----------------
@@ -85,6 +97,13 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "home") return sendMainMenu(env, chatId);
 
   if (action === "preview") return sendPreviewLinks(env, chatId);
+
+  if (action === "stats") return sendStatsMenu(env, chatId);
+
+  if (action === "resetstats") {
+    await resetStats(env);
+    return sendStatsMenu(env, chatId);
+  }
 
   if (action === "pick") {
     const kind = rest[0];
@@ -126,6 +145,14 @@ async function handleCallback(env, chatId, messageId, data) {
 
   if (action === "del") {
     return deleteChild(env, chatId, rest.join(":"));
+  }
+
+  if (action === "resetimages") {
+    return resetAllImages(env, chatId);
+  }
+
+  if (action === "resetimage") {
+    return resetOneImage(env, chatId, rest.join(":"));
   }
 
   if (action === "cancel") {
@@ -215,6 +242,9 @@ async function renderTree(env, chatId, session, note) {
   if (Array.isArray(node)) {
     rows.push([btn("➕ Add new item", "add")]);
   }
+  if (session.kind === "images" && session.path.length === 0) {
+    rows.push([btn("🔄 Reset ALL photos to default", "resetimages")]);
+  }
   if (session.path.length && Array.isArray(getPath(merged, session.path.slice(0, -1).join(".")) ?? merged)) {
     // current node is an item inside an array one level up — offer delete
     rows.push([btn("🗑️ Delete this item", `del:${session.path[session.path.length - 1]}:__self`)]);
@@ -254,7 +284,7 @@ async function startEdit(env, chatId, key) {
     session.awaiting = { path, type: "photo" };
     await setSession(env, chatId, session);
     await tgSendMessage(env, chatId, `📸 Send the new photo for <b>${humanize(key)}</b>.\n(Just send it as a normal photo message.)`, {
-      reply_markup: kb([[btn("❌ Cancel", "cancel")]]),
+      reply_markup: kb([[btn("↩️ Reset this one to default", `resetimage:${key}`)], [btn("❌ Cancel", "cancel")]]),
     });
     return;
   }
@@ -307,10 +337,50 @@ async function handleAwaitedInput(env, chatId, session, msg) {
   await renderTree(env, chatId, session, "✅ Saved!");
 }
 
+// IMPORTANT: this saves only the RAW override doc (not the merged
+// defaults+override view) — a single changed leaf gets written back on
+// top of whatever overrides already existed, nothing else. Previously
+// this saved the full `merged` object (defaults + overrides together),
+// which meant editing even one photo silently wrote every OTHER photo's
+// key into the override doc too, holding its plain default filename
+// instead of a real Telegram file_id. Since /media resolves override
+// values as Telegram file_ids, that "poisoned" every untouched image on
+// the site with a broken link. Only ever persist what was actually
+// changed.
 async function saveLeaf(env, session, value, logChange) {
-  const { docKey, merged } = await loadMerged(env, session.kind, session.site);
-  setPath(merged, session.awaiting.path, value);
-  await saveDoc(env, docKey, merged, { logChange });
+  const docKey = docKeyFor(session.kind, session.site);
+  const base = defaultsFor(session.kind, session.site);
+  const override = await getDoc(env, docKey, Array.isArray(base) ? [] : {});
+  setPath(override, session.awaiting.path, value);
+  await saveDoc(env, docKey, override, { logChange });
+}
+
+// Wipes every photo override for the current site back to the static
+// defaults baked into config.js (i.e. clears the images:<site> doc
+// entirely). Also the fix for any already-poisoned doc from the old
+// saveLeaf bug, if the self-healing read-side guard is ever bypassed.
+async function resetAllImages(env, chatId) {
+  const session = await getSession(env, chatId);
+  if (!session || session.kind !== "images") return sendMainMenu(env, chatId);
+  const docKey = docKeyFor(session.kind, session.site);
+  await saveDoc(env, docKey, {}, { logChange: "Reset ALL photos to default" });
+  session.path = [];
+  await setSession(env, chatId, session);
+  return renderTree(env, chatId, session, "🔄 All photos reset to their defaults.");
+}
+
+// Removes a single key's override, so that one photo falls back to the
+// static default again, leaving every other admin-uploaded photo alone.
+async function resetOneImage(env, chatId, key) {
+  const session = await getSession(env, chatId);
+  if (!session || session.kind !== "images") return sendMainMenu(env, chatId);
+  const docKey = docKeyFor(session.kind, session.site);
+  const override = await getDoc(env, docKey, {});
+  delete override[key];
+  await saveDoc(env, docKey, override, { logChange: `Reset photo to default: ${key}` });
+  delete session.awaiting;
+  await setSession(env, chatId, session);
+  return renderTree(env, chatId, session, `↩️ ${humanize(key)} reset to default.`);
 }
 
 // ---------------- ARRAY ADD / DELETE ----------------
