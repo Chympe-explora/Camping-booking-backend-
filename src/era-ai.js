@@ -11,9 +11,18 @@
  *      they're just live lookups.
  *   2. KNOWLEDGE BASE — a small built-in set of generic Q&A, plus
  *      admin-taught entries (see teachAnswer below), matched by simple
- *      keyword overlap. Good enough for FAQ-style matching without
- *      needing an external AI API.
- *   3. FALLBACK — if nothing matches confidently, ERA AI gives a graceful
+ *      keyword overlap. Checked first because a confident KB match is
+ *      usually better-phrased than raw site text.
+ *   3. FULL-SITE SEARCH — every real sentence on the site (title, sub,
+ *      descriptions, bios, policy text, everything) is indexed as a
+ *      "chunk" grouped by whichever section/card it belongs to. A
+ *      visitor's question — however it's phrased — is matched by
+ *      keyword overlap against that whole index, not just a hand-picked
+ *      FAQ list, so any twist on a question whose answer genuinely
+ *      exists somewhere on the site can be found, wherever it lives.
+ *      The site the visitor is chatting from AND the home/root site are
+ *      both indexed, so general company questions work from any page.
+ *   4. FALLBACK — if nothing matches confidently, ERA AI gives a graceful
  *      "not sure" reply and (only if learning is enabled) queues the
  *      question so the admin can teach it the right answer from Telegram.
  *
@@ -41,6 +50,86 @@ const UNANSWERED_DOC = "eraUnanswered:global"; // queue of questions ERA AI coul
 const STATS_DOC = "eraStats:global";
 
 const MATCH_THRESHOLD = 0.34;
+const CHUNK_MATCH_THRESHOLD = 0.32;
+
+// Keys we never want to treat as visitor-facing content — filenames,
+// ids, links, colors, and other structural/asset metadata that lives
+// in the same content tree as the actual sentences.
+const SKIP_KEYS = new Set([
+  "image", "images", "icon", "icons", "id", "ids", "link", "href", "url", "src",
+  "color", "colour", "backgroundimage", "logoimage", "logo", "key", "type", "cat",
+  "span", "file", "fileid", "path", "route", "action", "callback", "value", "code",
+  "currency", "unit", "order", "index", "site", "siteid",
+]);
+
+function looksLikeFilenameOrUrl(v) {
+  return /\.(jpg|jpeg|png|svg|gif|webp)$/i.test(v) || /^https?:\/\//i.test(v) || /^#?[0-9a-f]{3,8}$/i.test(v);
+}
+
+function isContentString(key, value) {
+  if (typeof value !== "string") return false;
+  const v = value.trim();
+  if (v.length < 3) return false;
+  if (looksLikeFilenameOrUrl(v)) return false;
+  if (SKIP_KEYS.has(String(key).toLowerCase())) return false;
+  if (/^\d+(\.\d+)?$/.test(v)) return false;
+  return true;
+}
+
+const STOPWORDS = new Set([
+  "the", "a", "an", "is", "are", "was", "were", "do", "does", "did", "what", "which",
+  "who", "whom", "how", "when", "where", "why", "of", "in", "on", "at", "to", "for",
+  "and", "or", "with", "about", "can", "could", "would", "should", "will", "i", "you",
+  "your", "my", "me", "it", "this", "that", "these", "those", "be", "been", "have",
+  "has", "had", "there", "any", "some", "if", "so", "just", "please", "tell", "know",
+]);
+
+function meaningfulTokens(s) {
+  return tokenize(s).filter((t) => t.length > 2 && !STOPWORDS.has(t));
+}
+
+// Walks the whole content tree (an object graph of nested sections,
+// objects, and arrays) and turns every real sentence in it into a
+// labeled "chunk" — grouped by whichever object it belongs to, so a
+// chunk reads as one coherent unit (a card, a section, a policy block)
+// rather than one word at a time. This is what lets ERA AI answer from
+// ANY part of the site's actual text, not just curated FAQ entries.
+function collectContentChunks(node, ancestorLabel, out) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectContentChunks(item, ancestorLabel, out);
+    return;
+  }
+  const ownStrings = [];
+  const childObjects = [];
+  for (const k of Object.keys(node)) {
+    const v = node[k];
+    if (typeof v === "string") {
+      if (isContentString(k, v)) ownStrings.push(v);
+    } else if (v && typeof v === "object") {
+      childObjects.push([k, v]);
+    }
+  }
+  const label = node.title || node.name || node.heading || node.label || ancestorLabel;
+  if (ownStrings.length) {
+    out.push({ section: label, text: ownStrings.join(". ") });
+  }
+  for (const [k, v] of childObjects) {
+    collectContentChunks(v, humanizeKey(k), out);
+  }
+}
+
+function buildChunkIndex(content) {
+  const chunks = [];
+  collectContentChunks(content, "General", chunks);
+  return chunks.map((c) => ({ ...c, tokens: new Set(meaningfulTokens(c.section + " " + c.text)) }));
+}
+
+function scoreChunk(queryTokens, chunk) {
+  if (!queryTokens.length) return 0;
+  const matched = queryTokens.filter((t) => chunk.tokens.has(t));
+  return matched.length / queryTokens.length;
+}
 
 // A small built-in seed so ERA AI is useful on day one, before any
 // admin teaching has happened. Deliberately has no hard-coded prices —
@@ -180,6 +269,22 @@ async function sitePrices(env, site) {
   return deepMerge(base, override);
 }
 
+// Builds the searchable index for a visitor's question: everything on
+// the site they're currently on, plus the root/home site's content
+// (company-level info like About Us, Instagram, WhatsApp number) so
+// general questions are answered no matter which page the chat opened
+// from.
+async function buildSiteIndex(env, site) {
+  const sites = new Set(["root"]);
+  if (isValidSite(site)) sites.add(site);
+  const chunks = [];
+  for (const s of sites) {
+    const content = await siteContent(env, s);
+    chunks.push(...buildChunkIndex(content));
+  }
+  return chunks;
+}
+
 async function tryLiveIntent(env, site, message) {
   if (!isValidSite(site) || site === "root") return null;
   const msg = message.toLowerCase();
@@ -273,26 +378,52 @@ export async function handleEraMessage(request, env) {
     return json({ ok: true, reply: liveAnswer, source: "live" }, env);
   }
 
-  // 2. knowledge base (built-in seed + admin-taught entries)
+  // 2. knowledge base (built-in seed + admin-taught entries) — curated,
+  //    short, well-phrased answers. Checked first because when it has a
+  //    confident match, it's usually a nicer answer than raw site text.
   const taught = await getTaughtKnowledge(env);
   const knowledge = STATIC_KB.concat(taught);
   const queryTokens = tokenize(trimmed);
-  let best = null;
-  let bestScore = 0;
+  let bestKb = null;
+  let bestKbScore = 0;
   for (const entry of knowledge) {
     const score = scoreMatch(queryTokens, entry.questions);
-    if (score > bestScore) {
-      bestScore = score;
-      best = entry;
+    if (score > bestKbScore) {
+      bestKbScore = score;
+      bestKb = entry;
+    }
+  }
+  if (bestKb && bestKbScore >= MATCH_THRESHOLD) {
+    await bumpStats(env);
+    return json({ ok: true, reply: bestKb.answer, source: "kb" }, env);
+  }
+
+  // 3. full-site search — every real sentence on the site (and the home
+  //    page) is indexed as a chunk, so a question about ANYTHING that's
+  //    actually written on the site gets answered, however it's phrased,
+  //    regardless of which section it lives in.
+  const meaningfulQueryTokens = meaningfulTokens(trimmed);
+  if (meaningfulQueryTokens.length) {
+    const index = await buildSiteIndex(env, site);
+    let ranked = index
+      .map((c) => ({ chunk: c, score: scoreChunk(meaningfulQueryTokens, c) }))
+      .filter((r) => r.score >= CHUNK_MATCH_THRESHOLD)
+      .sort((a, b) => b.score - a.score);
+    if (ranked.length) {
+      const top = ranked.slice(0, 2).filter((r, i) => i === 0 || r.score >= ranked[0].score - 0.15);
+      const seen = new Set();
+      const parts = [];
+      for (const r of top) {
+        if (seen.has(r.chunk.text)) continue;
+        seen.add(r.chunk.text);
+        parts.push(r.chunk.text);
+      }
+      await bumpStats(env);
+      return json({ ok: true, reply: parts.join("\n\n"), source: "content" }, env);
     }
   }
 
-  if (best && bestScore >= MATCH_THRESHOLD) {
-    await bumpStats(env);
-    return json({ ok: true, reply: best.answer, source: "kb" }, env);
-  }
-
-  // 3. fallback — queue for teaching only if learning is currently on
+  // 4. fallback — queue for teaching only if learning is currently on
   const fallback = "I'm not fully sure about that one yet — I've flagged it for the team. For anything urgent, tap Book Now or message us directly and we'll help right away.";
   const settings = await getSettings(env);
   if (settings.learningEnabled !== false) {
