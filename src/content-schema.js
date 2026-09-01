@@ -35,9 +35,13 @@ export const SCHEMA_DEFAULTS = {
         "badge": "MEGHALAYA \u2014 WATERFALLS, CAVES & WILDERNESS TRAILS",
         "title": "Your Gateway to Meghalaya's Untouched Corners",
         "sub": "From a hidden waterfall and cave system a short trek from Khaddum Village, to a 6-day wilderness expedition into untouched landscapes \u2014 we design guided trips into Meghalaya's least-visited corners.",
+        "quote": "Symphony in the mist.",
         "videoUrl": "",
+        "videoEnabled": true,
         "fallbackImage": "Trek Trail Mist.jpg",
-        "enabled": true
+        "enabled": true,
+        "discoverLabel": "Discover",
+        "discoverTargetId": "destinations"
       },
       "notice": {
         "enabled": false,

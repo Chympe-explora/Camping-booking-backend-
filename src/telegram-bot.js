@@ -339,6 +339,10 @@ async function handleCallback(env, chatId, messageId, data) {
     return startEdit(env, chatId, rest.join(":"));
   }
 
+  if (action === "toggle") {
+    return toggleBoolean(env, chatId, rest.join(":"));
+  }
+
   if (action === "add") {
     return addArrayItem(env, chatId);
   }
@@ -445,6 +449,16 @@ async function renderTree(env, chatId, session, note) {
   const rows = [];
   for (const group of chunk(children, 1)) {
     for (const child of group) {
+      // Booleans get a single tap-to-flip toggle button instead of a
+      // "type true/false" text prompt — this is what makes things like
+      // "Hero Video: On/Off" or "Notice: On/Off" a real on/off switch
+      // in the bot, with no typing required.
+      if (child.kind === "boolean") {
+        const isOnVal = child.preview === "true";
+        const label = `${isOnVal ? "✅" : "⛔"} ${humanize(child.key)} — ${isOnVal ? "ON (tap to turn off)" : "OFF (tap to turn on)"}`;
+        rows.push([btn(truncateLabel(label), `toggle:${child.key}`)]);
+        continue;
+      }
       const label = `${iconFor(child.kind, session.kind)} ${humanize(child.key)} — ${child.preview}`;
       const cb = child.kind === "object" || child.kind === "array" ? `into:${child.key}` : `edit:${child.key}`;
       rows.push([btn(truncateLabel(label), cb)]);
@@ -481,6 +495,24 @@ function iconFor(childKind, docKind) {
 
 function truncateLabel(s) {
   return s.length > 60 ? s.slice(0, 59) + "…" : s;
+}
+
+// ---------------- TOGGLE A BOOLEAN (on/off switches, e.g. hero video, notice) ----------------
+
+async function toggleBoolean(env, chatId, key) {
+  const session = await getSession(env, chatId);
+  if (!session) return sendMainMenu(env, chatId, "Session expired, starting over.");
+  const { docKey, merged } = await loadMerged(env, session.kind, session.site);
+  const path = [...session.path, key].join(".");
+  const current = getPath(merged, path);
+  const next = !(current === true || current === "true");
+
+  const base = defaultsFor(session.kind, session.site);
+  const override = await getDoc(env, docKey, Array.isArray(base) ? [] : {});
+  setPath(override, path, next);
+  await saveDoc(env, docKey, override, { logChange: `Changed ${path} → ${next}` });
+
+  return renderTree(env, chatId, session, `${next ? "✅ Turned ON" : "⛔ Turned OFF"}: ${humanize(key)}`);
 }
 
 // ---------------- EDIT A LEAF ----------------
