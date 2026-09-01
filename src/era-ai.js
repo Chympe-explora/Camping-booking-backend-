@@ -9,35 +9,53 @@
  *      ones the admin bot edits) so ERA AI never repeats a stale number.
  *      These always work, learning toggle or not — they're not "learned",
  *      they're just live lookups.
- *   2. KNOWLEDGE BASE — a small built-in set of generic Q&A, plus
- *      admin-taught entries (see teachAnswer below), matched by simple
- *      keyword overlap. Checked first because a confident KB match is
- *      usually better-phrased than raw site text.
+ *   2. KNOWLEDGE BASE — a small built-in set of generic Q&A (including
+ *      casual small talk — greetings, thanks, "how are you", jokes,
+ *      etc., each with several varied replies so ERA AI doesn't sound
+ *      robotic on repeat visits), plus admin-taught entries (see
+ *      teachAnswer / teachBulkAnswers below), matched by simple keyword
+ *      overlap. Checked first because a confident KB match is usually
+ *      better-phrased than raw site text.
  *   3. FULL-SITE SEARCH — every real sentence on the site (title, sub,
- *      descriptions, bios, policy text, everything) is indexed as a
- *      "chunk" grouped by whichever section/card it belongs to. A
- *      visitor's question — however it's phrased — is matched by
- *      keyword overlap against that whole index, not just a hand-picked
- *      FAQ list, so any twist on a question whose answer genuinely
- *      exists somewhere on the site can be found, wherever it lives.
- *      The site the visitor is chatting from AND the home/root site are
- *      both indexed, so general company questions work from any page.
+ *      descriptions, bios, policy text, everything) PLUS every freeform
+ *      "info note" the admin has pasted in (see addAdminNotes below) is
+ *      indexed as a "chunk" grouped by whichever section/card it
+ *      belongs to. A visitor's question — however it's phrased — is
+ *      matched by keyword overlap against that whole index, not just a
+ *      hand-picked FAQ list, so any twist on a question whose answer
+ *      genuinely exists somewhere on the site (or in something the
+ *      admin fed it) can be found, wherever it lives. The site the
+ *      visitor is chatting from AND the home/root site are both
+ *      indexed, so general company questions work from any page.
  *   4. FALLBACK — if nothing matches confidently, ERA AI gives a graceful
  *      "not sure" reply and (only if learning is enabled) queues the
  *      question so the admin can teach it the right answer from Telegram.
  *
  * TELEGRAM IS THE STORAGE (same pattern as the rest of this backend —
- * see store.js): the knowledge base, unanswered-question queue, and
- * learning on/off flag are all persisted via getDoc/saveDoc.
+ * see store.js): the knowledge base, admin info notes, unanswered-
+ * question queue, and learning on/off flag are all persisted via
+ * getDoc/saveDoc.
+ *
+ * ADMIN BULK TEACHING — the admin can paste an unlimited number of
+ * question/answer pairs (or just plain paragraphs of info) from
+ * Telegram at any time, in whatever format is natural to paste
+ * (`Q:`/`A:` labels, a numbered list, "Question? -- Answer" on one
+ * line, or blank-line-separated blocks). parseQABlob() below turns
+ * that raw paste into structured pairs, teachBulkAnswers() adds them
+ * straight to the knowledge base, and anything that isn't shaped like
+ * a question gets kept as a searchable info note via addAdminNotes()
+ * instead of being thrown away — so nothing the admin sends is wasted,
+ * and there is no limit on how much or how often they feed it. See the
+ * "📚 Bulk Teach Q&A" flow / `/teach` command in telegram-bot.js.
  *
  * THE "STOP LEARNING" TOGGLE — what it does and doesn't do:
  *   OFF only pauses ERA AI's passive knowledge growth: new unanswered
  *   questions stop being queued, so nothing new gets added to the
  *   knowledge base on its own. ERA AI keeps answering visitors exactly
  *   as before, using whatever it already knows. An admin can still
- *   manually teach it an answer at any time (that's an explicit edit,
- *   same as editing site text) — the toggle only affects automatic
- *   learning from visitor traffic.
+ *   manually teach it an answer (single or bulk) at any time — that's
+ *   an explicit edit, same as editing site text — the toggle only
+ *   affects automatic learning from visitor traffic.
  */
 
 import { SCHEMA_DEFAULTS } from "./content-schema.js";
@@ -47,6 +65,7 @@ import { json } from "./booking.js";
 const KNOWLEDGE_DOC = "eraKnowledge:global"; // admin-taught Q&A pairs (the "learned" layer)
 const SETTINGS_DOC = "eraSettings:global"; // { learningEnabled }
 const UNANSWERED_DOC = "eraUnanswered:global"; // queue of questions ERA AI couldn't confidently answer
+const NOTES_DOC = "eraNotes:global"; // freeform info the admin has pasted in — not shaped as Q&A, indexed alongside site text for full-site search
 const STATS_DOC = "eraStats:global";
 
 const MATCH_THRESHOLD = 0.34;
@@ -160,7 +179,96 @@ const STATIC_KB = [
     questions: ["best time to visit", "best season", "when should i go", "weather"],
     answer: "Meghalaya's cooler, drier months generally give the best visibility and easiest trekking conditions, but tours run across most of the year — check the Booking page for live date availability.",
   },
+
+  // ---- casual small talk — several varied replies each, picked at
+  // random (see pickAnswer), so ERA AI feels like a friendly chat and
+  // not a script repeating the same line every time. ----
+  {
+    id: "c-greet",
+    questions: [
+      "hi", "hello", "hey", "heya", "hiya", "yo", "hii", "hiii",
+      "good morning", "good afternoon", "good evening", "morning", "evening", "namaste",
+    ],
+    answers: [
+      "Hey there! 👋 I'm ERA AI. Ask me anything about the trip — packages, pricing, what to bring, or how booking works.",
+      "Hello! 🌿 Great to have you here. What can I help you plan today?",
+      "Hey! 😊 I'm around for anything camping, pricing, or booking related — what's up?",
+    ],
+  },
+  {
+    id: "c-howareyou",
+    questions: ["how are you", "how are you doing", "hows it going", "whats up", "sup", "hows life", "how you doing"],
+    answers: [
+      "I'm doing great, thanks for asking! 🌿 Ready to help you plan an awesome trip. What's on your mind?",
+      "All good here! 😊 What can I help you with today?",
+      "Doing well! Excited to help you get sorted for the trip — what do you need?",
+    ],
+  },
+  {
+    id: "c-thanks",
+    questions: ["thanks", "thank you", "thx", "thankyou", "appreciate it", "ty", "many thanks"],
+    answers: [
+      "You're very welcome! 🙌 Anything else you'd like to know?",
+      "Anytime! 😊 Happy to help.",
+      "No problem at all — let me know if you need anything else!",
+    ],
+  },
+  {
+    id: "c-bye",
+    questions: ["bye", "goodbye", "see you", "see ya", "cya", "ttyl", "bye bye", "gtg"],
+    answers: [
+      "See you soon! 🌿 Come back anytime you have questions.",
+      "Take care! Hope to see you on the trail soon. 🥾",
+      "Bye for now! I'll be right here whenever you need me.",
+    ],
+  },
+  {
+    id: "c-joke",
+    questions: ["tell me a joke", "make me laugh", "say something funny", "know any jokes", "youre funny"],
+    answers: [
+      "Why don't campers ever get cold? They always sleep near their fans! 😄 Anyway — want to hear about our packages?",
+      "I tried cracking a joke about caves once… it fell a bit flat. 😅 Need help with dates or pricing instead?",
+    ],
+  },
+  {
+    id: "c-compliment",
+    questions: ["you are awesome", "good bot", "nice bot", "you are smart", "you are helpful", "i like you", "youre the best"],
+    answers: [
+      "Aww, thank you! 🌿 I try my best. Let me know what else you need!",
+      "That's really kind! 😊 Happy to keep helping — what's next?",
+    ],
+  },
+  {
+    id: "c-bored",
+    questions: ["im bored", "i am bored", "entertain me", "im booored"],
+    answers: [
+      "Let's fix that — ask me 'what packages do you have' and I'll show you something fun to plan around! 🌿",
+    ],
+  },
+  {
+    id: "c-isbot",
+    questions: ["are you human", "are you real", "are you a real person", "is this a bot", "are you ai", "are you a robot"],
+    answers: [
+      "I'm ERA AI — a virtual assistant, not a human! 🤖 But I know this trip inside and out, so ask away.",
+    ],
+  },
+  {
+    id: "c-okay",
+    questions: ["ok", "okay", "cool", "nice", "great", "alright", "got it", "sounds good"],
+    answers: [
+      "👍 Let me know if you want to dig into packages, pricing, or booking.",
+      "Great! I'm here if anything else comes up.",
+    ],
+  },
 ];
+
+function pickAnswer(entry) {
+  if (entry.answer) return entry.answer;
+  if (Array.isArray(entry.answers) && entry.answers.length) {
+    return entry.answers[Math.floor(Math.random() * entry.answers.length)];
+  }
+  return "";
+}
 
 function tokenize(s) {
   return String(s || "")
@@ -208,6 +316,139 @@ async function getTaughtKnowledge(env) {
   return getDoc(env, KNOWLEDGE_DOC, []);
 }
 
+export async function getAdminNotes(env) {
+  return getDoc(env, NOTES_DOC, []);
+}
+
+// Freeform info the admin pastes that isn't shaped like a question
+// (a paragraph about facilities, a policy update, background on a new
+// package, etc). Stored as-is and folded into the full-site search
+// index (tier 3) so a visitor's question can match it just like it
+// would match real site text — always allowed, same as teachAnswer.
+export async function addAdminNotes(env, notes) {
+  const clean = (notes || []).map((n) => String(n || "").trim()).filter((n) => n.length > 4);
+  if (!clean.length) return 0;
+  const list = await getDoc(env, NOTES_DOC, []);
+  for (const text of clean) {
+    list.unshift({ id: crypto.randomUUID().slice(0, 8), text, addedFrom: "admin-note", ts: Date.now() });
+  }
+  await saveDoc(env, NOTES_DOC, list.slice(0, 500), {
+    logChange: `ERA AI saved ${clean.length} new info note(s) from the admin`,
+  });
+  return clean.length;
+}
+
+// Admin explicitly teaching MANY answers at once — same trust level as
+// teachAnswer (single question from the pending queue), just batched
+// into one write so pasting 100+ pairs doesn't fire 100+ Telegram
+// message edits. Always allowed regardless of the learning toggle.
+export async function teachBulkAnswers(env, pairs) {
+  const clean = (pairs || []).filter((p) => p && p.question && p.answer);
+  if (!clean.length) return 0;
+  const knowledge = await getTaughtKnowledge(env);
+  for (const p of clean) {
+    knowledge.push({
+      id: crypto.randomUUID().slice(0, 8),
+      questions: [String(p.question).trim()],
+      answer: String(p.answer).trim(),
+      addedFrom: "admin-bulk",
+      ts: Date.now(),
+    });
+  }
+  await saveDoc(env, KNOWLEDGE_DOC, knowledge, {
+    logChange: `ERA AI bulk-learned ${clean.length} new Q&A pair(s) from the admin`,
+  });
+  return clean.length;
+}
+
+// ---------------------------------------------------------------------
+// Bulk Q&A parsing — lets the admin paste any number of Q&A pairs (or
+// even plain informational paragraphs) in one Telegram message, in
+// whichever format is natural to type or paste. Anything that isn't
+// shaped like a question/answer is kept as a "note" (see
+// addAdminNotes) rather than silently dropped, so nothing pasted is
+// ever wasted. Supported shapes, freely mixed in the same message:
+//   Q: What time is check-in?          1. Do you allow pets?
+//   A: 2pm onwards.                    No pets allowed on site.
+//
+//   Is wifi available? -- Yes, free wifi in common areas.
+//
+//   (blank-line separated block: first line = question, rest = answer)
+// ---------------------------------------------------------------------
+const Q_LABEL = /^(?:\d+[).\-:]?\s*)?q(?:uestion)?\s*[:\-–)]\s*(.+)$/i;
+const A_LABEL = /^(?:\d+[).\-:]?\s*)?a(?:nswer)?\s*[:\-–)]\s*(.+)$/i;
+const INLINE_QA = /^(.{3,}\?)\s*(?:::|=>|--|—|\|)\s*(.+)$/;
+
+export function parseQABlob(text) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  const pairs = [];
+  const notes = [];
+  let curQ = null;
+  let curA = [];
+  let noteBuf = [];
+
+  const flushQA = () => {
+    if (curQ && curA.length) {
+      pairs.push({ question: curQ.trim(), answer: curA.join(" ").trim() });
+    } else if (curQ) {
+      noteBuf.push(curQ.trim());
+    }
+    curQ = null;
+    curA = [];
+  };
+  const flushNote = () => {
+    if (noteBuf.length) notes.push(noteBuf.join(" ").trim());
+    noteBuf = [];
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      flushQA();
+      flushNote();
+      continue;
+    }
+
+    const inline = line.match(INLINE_QA);
+    if (inline) {
+      flushQA();
+      flushNote();
+      pairs.push({ question: inline[1].trim(), answer: inline[2].trim() });
+      continue;
+    }
+
+    const qMatch = line.match(Q_LABEL);
+    if (qMatch) {
+      flushQA();
+      curQ = qMatch[1];
+      continue;
+    }
+
+    const aMatch = line.match(A_LABEL);
+    if (aMatch && curQ) {
+      curA.push(aMatch[1]);
+      continue;
+    }
+
+    if (!curQ && !curA.length && /\?\s*$/.test(line)) {
+      // a bare question line with no "Q:" label — e.g. a numbered list
+      // pasted straight from notes ("1. What time is check-in?")
+      curQ = line.replace(/^\d+[).\-:]?\s*/, "");
+      continue;
+    }
+
+    if (curQ) {
+      curA.push(line); // multi-line answer, keep collecting until a blank line / next question
+    } else {
+      noteBuf.push(line);
+    }
+  }
+  flushQA();
+  flushNote();
+
+  return { pairs, notes: notes.filter((n) => n.length > 4) };
+}
+
 export async function listUnanswered(env) {
   return getDoc(env, UNANSWERED_DOC, []);
 }
@@ -244,11 +485,13 @@ export async function getEraStatusText(env) {
   const settings = await getSettings(env);
   const unanswered = await listUnanswered(env);
   const knowledge = await getTaughtKnowledge(env);
+  const notes = await getAdminNotes(env);
   const stats = await getDoc(env, STATS_DOC, { totalMessages: 0 });
   return {
     learningEnabled: settings.learningEnabled !== false,
     pendingCount: unanswered.length,
     knowledgeCount: STATIC_KB.length + knowledge.length,
+    notesCount: notes.length,
     totalMessages: stats.totalMessages || 0,
   };
 }
@@ -281,6 +524,13 @@ async function buildSiteIndex(env, site) {
   for (const s of sites) {
     const content = await siteContent(env, s);
     chunks.push(...buildChunkIndex(content));
+  }
+  // Freeform info notes the admin has fed in via Telegram — searchable
+  // exactly like real site text, so anything the admin pastes (not
+  // just structured Q&A) can surface as an answer.
+  const notes = await getAdminNotes(env);
+  for (const n of notes) {
+    chunks.push({ section: "Admin note", text: n.text, tokens: new Set(meaningfulTokens(n.text)) });
   }
   return chunks;
 }
@@ -395,7 +645,7 @@ export async function handleEraMessage(request, env) {
   }
   if (bestKb && bestKbScore >= MATCH_THRESHOLD) {
     await bumpStats(env);
-    return json({ ok: true, reply: bestKb.answer, source: "kb" }, env);
+    return json({ ok: true, reply: pickAnswer(bestKb), source: "kb" }, env);
   }
 
   // 3. full-site search — every real sentence on the site (and the home

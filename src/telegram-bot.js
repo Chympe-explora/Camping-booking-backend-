@@ -17,7 +17,7 @@ import { listChildren, humanize, chunk } from "./walker.js";
 import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
 import { getLiveStats, resetStats } from "./stats.js";
-import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled } from "./era-ai.js";
+import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
 
 const CATEGORIES = [
   { kind: "content", label: "✏️ Edit Website Text", perSite: true },
@@ -55,6 +55,13 @@ export async function handleTelegramAdminUpdate(env, update) {
   if (msg?.text === "/start" || msg?.text === "/menu") {
     await clearSession(env, chatId);
     await sendMainMenu(env, chatId);
+    return;
+  }
+
+  // Jump straight into bulk-teach mode from anywhere, anytime — no
+  // need to navigate the menu first.
+  if (msg?.text === "/teach") {
+    await startEraBulkTeach(env, chatId);
     return;
   }
 
@@ -101,17 +108,47 @@ async function sendEraMenu(env, chatId) {
     `🤖 <b>ERA AI</b>\n` +
     `Learning: <b>${status.learningEnabled ? "ON 🟢" : "PAUSED 🔴"}</b>\n` +
     `Knowledge entries: <b>${status.knowledgeCount}</b>\n` +
+    `Info notes fed in: <b>${status.notesCount}</b>\n` +
     `Questions waiting for an answer: <b>${status.pendingCount}</b>\n` +
     `Messages answered so far: <b>${status.totalMessages}</b>\n\n` +
     (status.learningEnabled
       ? "ERA AI is answering visitors and saving anything it can't answer, so you can teach it later."
       : "ERA AI is still answering visitors exactly as normal — it's just paused building new knowledge. Nothing new gets queued or auto-learned until you turn it back on.");
   const rows = [
+    [btn("📚 Bulk Teach Q&A", "erabulk")],
     [btn(status.learningEnabled ? "⏸️ Stop Learning" : "▶️ Resume Learning", "eratogglelearn")],
     [btn(`📋 Questions to Answer (${status.pendingCount})`, "erapending")],
     [btn("⬅️ Main Menu", "home")],
   ];
   await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+// ---- Bulk Teach — paste unlimited Q&A pairs (or plain info) anytime ----
+// Stays in this mode across as many messages as the admin wants to
+// send, so "paste 100 Q&As" can be done in one go or spread across many
+// messages, in one sitting or over days (each message refreshes the
+// session so it never expires mid-feed). Tap ✅ Done (or /menu) to exit.
+
+async function startEraBulkTeach(env, chatId) {
+  await setSession(env, chatId, { kind: "eraBulk", path: [], awaiting: { type: "eraBulk" } });
+  await tgSendMessage(
+    env,
+    chatId,
+    "📚 <b>Bulk Teach Mode</b>\n\n" +
+      "Paste as many questions &amp; answers as you want — in one message or spread across many, any time. Any of these styles work, and you can mix them:\n\n" +
+      "<code>Q: What time is check-in?\nA: 2pm onwards.</code>\n\n" +
+      "<code>1. Do you allow pets?\nNo pets allowed on site.</code>\n\n" +
+      "<code>Is wifi available? -- Yes, free wifi in common areas.</code>\n\n" +
+      "You can also just paste a plain paragraph of info (not shaped as Q&amp;A, e.g. forwarded from a customer chat) — I'll save it so ERA AI can search it too.\n\n" +
+      "Send as many messages as you like — I'll stay in this mode. Tap ✅ Done when you're finished.",
+    { reply_markup: kb([[btn("✅ Done", "eradonebulk")]]) }
+  );
+}
+
+async function finishEraBulkTeach(env, chatId) {
+  await clearSession(env, chatId);
+  await tgSendMessage(env, chatId, "✅ Got it — thanks for teaching ERA AI!");
+  return sendEraMenu(env, chatId);
 }
 
 async function toggleEraLearning(env, chatId) {
@@ -178,6 +215,8 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "eraview") return sendEraQuestionDetail(env, chatId, rest.join(":"));
   if (action === "eraanswer") return startEraAnswer(env, chatId, rest.join(":"));
   if (action === "eradiscard") return discardEraQuestion(env, chatId, rest.join(":"));
+  if (action === "erabulk") return startEraBulkTeach(env, chatId);
+  if (action === "eradonebulk") return finishEraBulkTeach(env, chatId);
 
   if (action === "pick") {
     const kind = rest[0];
@@ -234,6 +273,9 @@ async function handleCallback(env, chatId, messageId, data) {
     if (session && session.kind === "eraTeach") {
       await clearSession(env, chatId);
       return sendEraPendingList(env, chatId);
+    }
+    if (session && session.kind === "eraBulk") {
+      return finishEraBulkTeach(env, chatId);
     }
     if (session) {
       delete session.awaiting;
@@ -380,6 +422,30 @@ async function startEdit(env, chatId, key) {
 
 async function handleAwaitedInput(env, chatId, session, msg) {
   const { awaiting } = session;
+
+  if (awaiting.type === "eraBulk") {
+    const text = (msg.text ?? "").trim();
+    if (!text) {
+      await tgSendMessage(env, chatId, "Paste some Q&A text (or plain info), or tap ✅ Done to finish.", {
+        reply_markup: kb([[btn("✅ Done", "eradonebulk")]]),
+      });
+      return;
+    }
+    const { pairs, notes } = parseQABlob(text);
+    const addedPairs = await teachBulkAnswers(env, pairs);
+    const addedNotes = await addAdminNotes(env, notes);
+    await setSession(env, chatId, session); // refresh the session TTL — stay in bulk mode for the next paste
+
+    const parts = [];
+    if (addedPairs) parts.push(`✅ Learned ${addedPairs} Q&amp;A pair${addedPairs === 1 ? "" : "s"}.`);
+    if (addedNotes) parts.push(`📝 Saved ${addedNotes} info note${addedNotes === 1 ? "" : "s"} for ERA AI to search.`);
+    if (!parts.length) parts.push("Hmm, I couldn't find any Q&amp;A or info in that — try again, or check the format examples above.");
+
+    await tgSendMessage(env, chatId, parts.join("\n") + "\n\nKeep pasting more any time, or tap ✅ Done when finished.", {
+      reply_markup: kb([[btn("✅ Done", "eradonebulk")]]),
+    });
+    return;
+  }
 
   if (awaiting.type === "eraAnswer") {
     const text = (msg.text ?? "").trim();
