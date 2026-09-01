@@ -34,7 +34,19 @@ export const SCHEMA_DEFAULTS = {
       "hero": {
         "badge": "MEGHALAYA \u2014 WATERFALLS, CAVES & WILDERNESS TRAILS",
         "title": "Your Gateway to Meghalaya's Untouched Corners",
-        "sub": "From a hidden waterfall and cave system a short trek from Khaddum Village, to a 6-day wilderness expedition into untouched landscapes \u2014 we design guided trips into Meghalaya's least-visited corners."
+        "sub": "From a hidden waterfall and cave system a short trek from Khaddum Village, to a 6-day wilderness expedition into untouched landscapes \u2014 we design guided trips into Meghalaya's least-visited corners.",
+        "videoUrl": "",
+        "fallbackImage": "Trek Trail Mist.jpg",
+        "enabled": true
+      },
+      "notice": {
+        "enabled": false,
+        "title": "PUBLIC NOTICE",
+        "subtitle": "",
+        "text": "",
+        "buttonText": "Got it",
+        "iconBg": "#2E8B57",
+        "showAgain": ""
       },
       "visitorsRating": {
         "trustedText": "Trusted by 100+",
@@ -1149,7 +1161,10 @@ export const SCHEMA_DEFAULTS = {
         "sub": "Krem Chympe is India's 5th-longest cave system, with about 10.5 km of mapped passages (explorers have surveyed close to 19 km so far). A short forest trek from Khaddum Village leads you past the beautiful Chympe (Pieltleng) Waterfall to a hidden cave, an underground lake, golden mineral formations, and rare wildlife found almost nowhere else on Earth \u2014 all still untouched by crowds.",
         "visitorsLabel": "Visitors",
         "duration": "Full-Day Trip (3\u20134 Hrs Trek Each Way)",
-        "priceLabel": "Starts \u20b91500 Per Guide"
+        "priceLabel": "Starts \u20b91500 Per Guide",
+        "videoUrl": "",
+        "fallbackImage": "Blue watefall.jpg",
+        "enabled": true
       },
       "backgrounds": [
         "Blue watefall.jpg",
@@ -2066,7 +2081,10 @@ export const SCHEMA_DEFAULTS = {
         "sub": "This is not a conventional sightseeing tour. Beginning at Brichyrnot Village and continuing from Khaddum into forests, rivers, rocky terrain and secluded wilderness camps, the route gradually leaves the familiar tourist trail and moves toward the Meghalaya\u2013Assam border \u2014 passing remote waterfalls known primarily through local exploration and hunter knowledge.",
         "visitorsLabel": "Members",
         "duration": "6 Days, 5 Nights",
-        "priceLabel": "\u20b94,999 Per Person"
+        "priceLabel": "\u20b94,999 Per Person",
+        "videoUrl": "",
+        "fallbackImage": "hero-river-aerial.jpg",
+        "enabled": true
       },
       "backgrounds": [
         "hero-river-aerial.jpg",
