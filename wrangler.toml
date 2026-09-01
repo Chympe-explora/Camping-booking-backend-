@@ -31,7 +31,7 @@ ADMIN_USER_IDS = "8550710288"
 SITE_BASE_URL = "https://your-site.pages.dev"
 # The chat/group the bot posts new bookings + payment receipts to, with
 # Confirm/Reject buttons. Negative id = group/supergroup.
-TELEGRAM_CHAT_ID = "-1003766158262"
+TELEGRAM_CHAT_ID = "-100376158262"
 # The chat the bot posts site-content edit logs and permanent JSON
 # records to (used by the Telegram admin bot's editing menus).
 TELEGRAM_ADMIN_CHAT_ID = "8550710288"
