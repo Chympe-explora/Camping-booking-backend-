@@ -19,6 +19,11 @@
  *   POST /api/calculate-price   { site, packageKey, unitPrice, persons, addons, dateISO, code }
  *   GET  /media/:site/:key      admin-uploaded photo, proxied from Telegram
  *
+ * ERA AI — the visitor-facing chat assistant (see era-ai.js):
+ *   POST /api/era/message  { site, sessionId, message } -> { reply }
+ *   Managed entirely from the Telegram admin bot's "🤖 ERA AI" menu,
+ *   including the Stop Learning / Resume Learning toggle.
+ *
  * One shared webhook, routed by which chat the tap came from:
  *   POST /telegram-webhook
  *     -> admin chat (TELEGRAM_ADMIN_CHAT_ID)   => the button-driven admin bot
@@ -45,6 +50,7 @@
 import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
 import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleAdminResetImages } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
+import { handleEraMessage } from "./era-ai.js";
 
 export default {
   async fetch(request, env, ctx) {
@@ -77,6 +83,9 @@ export default {
       if (url.pathname === "/api/calculate-price" && request.method === "POST") return handleCalculatePrice(request, env);
       if (url.pathname === "/api/admin/reset-images" && request.method === "POST") return handleAdminResetImages(request, env);
       if (url.pathname.startsWith("/media/") && request.method === "GET") return handleMedia(url, env);
+
+      // ---- ERA AI chat assistant (new) ----
+      if (url.pathname === "/api/era/message" && request.method === "POST") return handleEraMessage(request, env);
 
       // ---- one shared Telegram webhook ----
       if (url.pathname === "/telegram-webhook" && request.method === "POST") {

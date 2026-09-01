@@ -17,6 +17,7 @@ import { listChildren, humanize, chunk } from "./walker.js";
 import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
 import { getLiveStats, resetStats } from "./stats.js";
+import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled } from "./era-ai.js";
 
 const CATEGORIES = [
   { kind: "content", label: "✏️ Edit Website Text", perSite: true },
@@ -71,6 +72,7 @@ export async function handleTelegramAdminUpdate(env, update) {
 
 async function sendMainMenu(env, chatId, note) {
   const rows = CATEGORIES.map((c) => [btn(c.label, `pick:${c.kind}`)]);
+  rows.push([btn("🤖 ERA AI Assistant", "eraai")]);
   rows.push([btn("👁️ Preview Live Sites", "preview")]);
   rows.push([btn("📊 Live Stats", "stats")]);
   const text =
@@ -89,6 +91,70 @@ async function sendStatsMenu(env, chatId) {
   });
 }
 
+// ---------------- ERA AI ----------------
+// The chat assistant on the live sites. See era-ai.js for how it
+// answers; everything here is just the Telegram controls for it.
+
+async function sendEraMenu(env, chatId) {
+  const status = await getEraStatusText(env);
+  const text =
+    `🤖 <b>ERA AI</b>\n` +
+    `Learning: <b>${status.learningEnabled ? "ON 🟢" : "PAUSED 🔴"}</b>\n` +
+    `Knowledge entries: <b>${status.knowledgeCount}</b>\n` +
+    `Questions waiting for an answer: <b>${status.pendingCount}</b>\n` +
+    `Messages answered so far: <b>${status.totalMessages}</b>\n\n` +
+    (status.learningEnabled
+      ? "ERA AI is answering visitors and saving anything it can't answer, so you can teach it later."
+      : "ERA AI is still answering visitors exactly as normal — it's just paused building new knowledge. Nothing new gets queued or auto-learned until you turn it back on.");
+  const rows = [
+    [btn(status.learningEnabled ? "⏸️ Stop Learning" : "▶️ Resume Learning", "eratogglelearn")],
+    [btn(`📋 Questions to Answer (${status.pendingCount})`, "erapending")],
+    [btn("⬅️ Main Menu", "home")],
+  ];
+  await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+async function toggleEraLearning(env, chatId) {
+  const status = await getEraStatusText(env);
+  await setLearningEnabled(env, !status.learningEnabled);
+  return sendEraMenu(env, chatId);
+}
+
+async function sendEraPendingList(env, chatId) {
+  const pending = await listUnanswered(env);
+  if (!pending.length) {
+    await tgSendMessage(env, chatId, "🎉 No pending questions — ERA AI has an answer for everything visitors have asked recently.", {
+      reply_markup: kb([[btn("⬅️ Back", "eraai")]]),
+    });
+    return;
+  }
+  const rows = pending.slice(0, 15).map((q) => [btn(`${truncateLabel(q.question)} (${q.count}×)`, `eraview:${q.id}`)]);
+  rows.push([btn("⬅️ Back", "eraai")]);
+  await tgSendMessage(env, chatId, "📋 <b>Questions ERA AI couldn't answer</b>\nTap one to teach it the right answer.", { reply_markup: kb(rows) });
+}
+
+async function sendEraQuestionDetail(env, chatId, id) {
+  const pending = await listUnanswered(env);
+  const q = pending.find((p) => p.id === id);
+  if (!q) return sendEraPendingList(env, chatId);
+  const text = `❓ <b>Visitor asked:</b>\n"${escapeHtml(q.question)}"\n\nAsked <b>${q.count}</b> time(s) on <b>${SITE_LABELS[q.site] || q.site}</b>.`;
+  await tgSendMessage(env, chatId, text, {
+    reply_markup: kb([[btn("✏️ Teach the answer", `eraanswer:${id}`)], [btn("🗑️ Discard", `eradiscard:${id}`)], [btn("⬅️ Back", "erapending")]]),
+  });
+}
+
+async function startEraAnswer(env, chatId, id) {
+  await setSession(env, chatId, { kind: "eraTeach", path: [], awaiting: { type: "eraAnswer", questionId: id } });
+  await tgSendMessage(env, chatId, "Type the answer ERA AI should give next time someone asks this ⤵️", {
+    reply_markup: kb([[btn("❌ Cancel", "erapending")]]),
+  });
+}
+
+async function discardEraQuestion(env, chatId, id) {
+  await discardUnanswered(env, id);
+  return sendEraPendingList(env, chatId);
+}
+
 // ---------------- CALLBACK ROUTER ----------------
 
 async function handleCallback(env, chatId, messageId, data) {
@@ -104,6 +170,14 @@ async function handleCallback(env, chatId, messageId, data) {
     await resetStats(env);
     return sendStatsMenu(env, chatId);
   }
+
+  // ---- ERA AI ----
+  if (action === "eraai") return sendEraMenu(env, chatId);
+  if (action === "eratogglelearn") return toggleEraLearning(env, chatId);
+  if (action === "erapending") return sendEraPendingList(env, chatId);
+  if (action === "eraview") return sendEraQuestionDetail(env, chatId, rest.join(":"));
+  if (action === "eraanswer") return startEraAnswer(env, chatId, rest.join(":"));
+  if (action === "eradiscard") return discardEraQuestion(env, chatId, rest.join(":"));
 
   if (action === "pick") {
     const kind = rest[0];
@@ -157,6 +231,10 @@ async function handleCallback(env, chatId, messageId, data) {
 
   if (action === "cancel") {
     const session = await getSession(env, chatId);
+    if (session && session.kind === "eraTeach") {
+      await clearSession(env, chatId);
+      return sendEraPendingList(env, chatId);
+    }
     if (session) {
       delete session.awaiting;
       await setSession(env, chatId, session);
@@ -302,6 +380,20 @@ async function startEdit(env, chatId, key) {
 
 async function handleAwaitedInput(env, chatId, session, msg) {
   const { awaiting } = session;
+
+  if (awaiting.type === "eraAnswer") {
+    const text = (msg.text ?? "").trim();
+    if (!text) {
+      await tgSendMessage(env, chatId, "Please type an answer, or tap Cancel.", { reply_markup: kb([[btn("❌ Cancel", "erapending")]]) });
+      return;
+    }
+    await teachAnswer(env, awaiting.questionId, text);
+    await clearSession(env, chatId);
+    await tgSendMessage(env, chatId, "✅ ERA AI learned that answer! It'll use it next time this question comes up.", {
+      reply_markup: kb([[btn("⬅️ Back to ERA AI", "eraai")]]),
+    });
+    return;
+  }
 
   if (awaiting.type === "photo") {
     const photos = msg.photo;
