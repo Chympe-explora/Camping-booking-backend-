@@ -18,6 +18,7 @@ import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
 import { getLiveStats, resetStats } from "./stats.js";
 import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
+import { getConversation, getConversationByShortId, setConversationStatus, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
 
 const CATEGORIES = [
   { kind: "content", label: "✏️ Edit Website Text", perSite: true },
@@ -63,6 +64,25 @@ export async function handleTelegramAdminUpdate(env, update) {
   if (msg?.text === "/teach") {
     await startEraBulkTeach(env, chatId);
     return;
+  }
+
+  // /reply <id> <message> — reply to a specific visitor's conversation
+  // by its short ID, from anywhere, anytime (see spec §12, option 2).
+  if (msg?.text && /^\/reply\b/i.test(msg.text)) {
+    return handleReplyCommand(env, chatId, msg.text);
+  }
+
+  // Native Telegram "swipe to reply" on a visitor-turn message we
+  // forwarded — this is an unambiguous, explicit admin gesture, so it
+  // takes priority over whatever button-flow session might otherwise
+  // be active (spec §12, option 3 — the preferred, easiest path for a
+  // non-technical guide).
+  if (msg?.text && msg.reply_to_message?.message_id) {
+    const sessionId = await resolveTelegramMessage(env, msg.reply_to_message.message_id);
+    if (sessionId) {
+      await deliverHumanReply(env, chatId, sessionId, msg.text);
+      return;
+    }
   }
 
   // Anything else is a reply to something the bot asked for
@@ -192,6 +212,65 @@ async function discardEraQuestion(env, chatId, id) {
   return sendEraPendingList(env, chatId);
 }
 
+// ---------------- ERA AI: per-visitor conversation control ----------------
+// The hybrid human-takeover layer — see conversations.js for the store
+// and forwarding, era-ai.js for what gates on conversation status.
+
+async function startConvReply(env, chatId, sessionId) {
+  const conv = await getConversation(env, sessionId);
+  if (!conv) {
+    await tgSendMessage(env, chatId, "⚠️ Couldn't find that visitor's conversation — it may have expired.");
+    return;
+  }
+  await setSession(env, chatId, { kind: "convReply", path: [], awaiting: { type: "convReply", sessionId } });
+  await tgSendMessage(env, chatId, `Type your reply to <b>Visitor #${conv.id}</b> ⤵️\n(You can also just swipe-reply directly on their message next time, or use <code>/reply ${conv.id} your message</code>.)`, {
+    reply_markup: kb([[btn("❌ Cancel", "cancel")]]),
+  });
+}
+
+async function changeConvStatus(env, chatId, sessionId, status) {
+  const conv = await setConversationStatus(env, sessionId, status);
+  if (!conv) {
+    await tgSendMessage(env, chatId, "⚠️ Couldn't find that visitor's conversation — it may have expired.");
+    return;
+  }
+  await tgSendMessage(env, chatId, `Visitor #${conv.id} is now <b>${statusLabel(status)}</b>.`);
+}
+
+// Delivers an admin's free-form reply to a specific visitor. This is
+// the one function all three reply paths (Reply button, swipe-reply,
+// /reply command) funnel through. It does NOT force a takeover — per
+// the hybrid spec, a guide can answer one question without pulling the
+// whole conversation out of AI mode (see era-ai.js's status gating).
+async function deliverHumanReply(env, chatId, sessionId, text) {
+  const conv = await getConversation(env, sessionId);
+  if (!conv) {
+    await tgSendMessage(env, chatId, "⚠️ Couldn't find that visitor's conversation — it may have expired.");
+    return;
+  }
+  await pushOutbox(env, sessionId, text, "human");
+  await tgSendMessage(env, chatId, `✅ Sent to Visitor #${conv.id}.`);
+}
+
+async function handleReplyCommand(env, chatId, text) {
+  const rest = text.replace(/^\/reply\s*/i, "").trim();
+  const spaceIdx = rest.indexOf(" ");
+  if (spaceIdx > 0) {
+    const shortId = rest.slice(0, spaceIdx).replace(/^#/, "").trim();
+    const replyText = rest.slice(spaceIdx + 1).trim();
+    if (shortId && replyText) {
+      const conv = await getConversationByShortId(env, shortId);
+      if (!conv) {
+        await tgSendMessage(env, chatId, `⚠️ No conversation found for Visitor #${shortId}.`);
+        return;
+      }
+      await deliverHumanReply(env, chatId, conv.sessionId, replyText);
+      return;
+    }
+  }
+  await tgSendMessage(env, chatId, "Usage: <code>/reply 1047 Your message here</code>");
+}
+
 // ---------------- CALLBACK ROUTER ----------------
 
 async function handleCallback(env, chatId, messageId, data) {
@@ -207,6 +286,14 @@ async function handleCallback(env, chatId, messageId, data) {
     await resetStats(env);
     return sendStatsMenu(env, chatId);
   }
+
+  // ---- ERA AI: per-visitor conversation controls (attached to every
+  // forwarded visitor message — see conversations.js#convButtons) ----
+  if (action === "convreply") return startConvReply(env, chatId, rest.join(":"));
+  if (action === "convai") return changeConvStatus(env, chatId, rest.join(":"), "ai");
+  if (action === "convtakeover") return changeConvStatus(env, chatId, rest.join(":"), "human");
+  if (action === "convpause") return changeConvStatus(env, chatId, rest.join(":"), "paused");
+  if (action === "convclose") return changeConvStatus(env, chatId, rest.join(":"), "closed");
 
   // ---- ERA AI ----
   if (action === "eraai") return sendEraMenu(env, chatId);
@@ -276,6 +363,11 @@ async function handleCallback(env, chatId, messageId, data) {
     }
     if (session && session.kind === "eraBulk") {
       return finishEraBulkTeach(env, chatId);
+    }
+    if (session && session.kind === "convReply") {
+      await clearSession(env, chatId);
+      await tgSendMessage(env, chatId, "Cancelled — nothing sent.");
+      return;
     }
     if (session) {
       delete session.awaiting;
@@ -444,6 +536,17 @@ async function handleAwaitedInput(env, chatId, session, msg) {
     await tgSendMessage(env, chatId, parts.join("\n") + "\n\nKeep pasting more any time, or tap ✅ Done when finished.", {
       reply_markup: kb([[btn("✅ Done", "eradonebulk")]]),
     });
+    return;
+  }
+
+  if (awaiting.type === "convReply") {
+    const text = (msg.text ?? "").trim();
+    if (!text) {
+      await tgSendMessage(env, chatId, "Please type your reply, or tap Cancel.", { reply_markup: kb([[btn("❌ Cancel", "cancel")]]) });
+      return;
+    }
+    await deliverHumanReply(env, chatId, awaiting.sessionId, text);
+    await clearSession(env, chatId);
     return;
   }
 

@@ -19,10 +19,24 @@
  *   POST /api/calculate-price   { site, packageKey, unitPrice, persons, addons, dateISO, code }
  *   GET  /media/:site/:key      admin-uploaded photo, proxied from Telegram
  *
- * ERA AI — the visitor-facing chat assistant (see era-ai.js):
- *   POST /api/era/message  { site, sessionId, message } -> { reply }
- *   Managed entirely from the Telegram admin bot's "🤖 ERA AI" menu,
- *   including the Stop Learning / Resume Learning toggle.
+ * ERA AI — the visitor-facing hybrid AI + human-support chat assistant
+ * (see era-ai.js + conversations.js):
+ *   POST /api/era/message  { site, sessionId, message }
+ *                          -> { reply, status, convId }
+ *     Every message is forwarded to the Telegram admin chat, always
+ *     (see conversations.js#forwardToTelegram). `reply` is the AI's
+ *     answer when the conversation is in AI mode, or null when a human
+ *     has taken over / paused it — the visitor's browser is expected to
+ *     poll for the eventual human reply in that case.
+ *   GET  /api/era/poll?site&sessionId&since=<ms timestamp>
+ *                          -> { status, messages: [{id,text,from,ts}] }
+ *     Polled by the widget while the chat panel is open, to pick up
+ *     replies a human typed in Telegram after the original request
+ *     already completed.
+ *   Managed entirely from the Telegram admin bot's "🤖 ERA AI" menu
+ *   (knowledge base / learning toggle) plus, per-visitor, the
+ *   ↩️ Reply / 🤖 AI / 👤 Take Over / ⏸ Pause / 🔴 Close buttons attached
+ *   to every forwarded visitor message (see telegram-bot.js).
  *
  * One shared webhook, routed by which chat the tap came from:
  *   POST /telegram-webhook
@@ -50,7 +64,7 @@
 import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
 import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleAdminResetImages } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
-import { handleEraMessage } from "./era-ai.js";
+import { handleEraMessage, handleEraPoll } from "./era-ai.js";
 
 export default {
   async fetch(request, env, ctx) {
@@ -86,6 +100,7 @@ export default {
 
       // ---- ERA AI chat assistant (new) ----
       if (url.pathname === "/api/era/message" && request.method === "POST") return handleEraMessage(request, env);
+      if (url.pathname === "/api/era/poll" && request.method === "GET") return handleEraPoll(url, env);
 
       // ---- one shared Telegram webhook ----
       if (url.pathname === "/telegram-webhook" && request.method === "POST") {

@@ -61,6 +61,7 @@
 import { SCHEMA_DEFAULTS } from "./content-schema.js";
 import { isValidSite, getDoc, saveDoc, deepMerge } from "./store.js";
 import { json } from "./booking.js";
+import { getOrCreateConversation, saveConversation, getConversation, forwardToTelegram, readOutbox } from "./conversations.js";
 
 const KNOWLEDGE_DOC = "eraKnowledge:global"; // admin-taught Q&A pairs (the "learned" layer)
 const SETTINGS_DOC = "eraSettings:global"; // { learningEnabled }
@@ -609,31 +610,34 @@ async function queueUnanswered(env, site, question) {
 }
 
 // ---------------------------------------------------------------------
-// POST /api/era/message  { site, sessionId, message }
+// The tiered answer engine, factored out so it can be reused for a
+// visitor's turn without needing to be the one thing that decides
+// whether Telegram gets notified — that now always happens, per the
+// hybrid spec (see handleEraMessage below).
+//
+// `context` is the previous visitor question in this conversation (if
+// any). When the current message is short or leans on a pronoun ("that",
+// "it", "does it include..."), its tokens are folded into tier 2/3
+// matching alongside the new message's own tokens, so a short follow-up
+// question still has enough to match against (spec §14).
 // ---------------------------------------------------------------------
-export async function handleEraMessage(request, env) {
-  const body = await request.json().catch(() => ({}));
-  const { site, message } = body || {};
+const ANAPHORA = /\b(that|this|it|those|these)\b/i;
 
-  if (!message || typeof message !== "string" || !message.trim()) {
-    return json({ ok: false, error: "message is required" }, env, 400);
-  }
-  const trimmed = message.trim().slice(0, 600);
-
+async function computeAiReply(env, site, trimmed, context) {
   // 1. live intents — never gated by the learning toggle, these read
   //    current content rather than "learning" anything.
   const liveAnswer = await tryLiveIntent(env, site, trimmed);
-  if (liveAnswer) {
-    await bumpStats(env);
-    return json({ ok: true, reply: liveAnswer, source: "live" }, env);
-  }
+  if (liveAnswer) return { reply: liveAnswer, source: "live" };
+
+  const needsContext = context && (meaningfulTokens(trimmed).length < 4 || ANAPHORA.test(trimmed));
+  const searchText = needsContext ? `${trimmed} ${context}` : trimmed;
 
   // 2. knowledge base (built-in seed + admin-taught entries) — curated,
   //    short, well-phrased answers. Checked first because when it has a
   //    confident match, it's usually a nicer answer than raw site text.
   const taught = await getTaughtKnowledge(env);
   const knowledge = STATIC_KB.concat(taught);
-  const queryTokens = tokenize(trimmed);
+  const queryTokens = tokenize(searchText);
   let bestKb = null;
   let bestKbScore = 0;
   for (const entry of knowledge) {
@@ -643,16 +647,13 @@ export async function handleEraMessage(request, env) {
       bestKb = entry;
     }
   }
-  if (bestKb && bestKbScore >= MATCH_THRESHOLD) {
-    await bumpStats(env);
-    return json({ ok: true, reply: pickAnswer(bestKb), source: "kb" }, env);
-  }
+  if (bestKb && bestKbScore >= MATCH_THRESHOLD) return { reply: pickAnswer(bestKb), source: "kb" };
 
   // 3. full-site search — every real sentence on the site (and the home
   //    page) is indexed as a chunk, so a question about ANYTHING that's
   //    actually written on the site gets answered, however it's phrased,
   //    regardless of which section it lives in.
-  const meaningfulQueryTokens = meaningfulTokens(trimmed);
+  const meaningfulQueryTokens = meaningfulTokens(searchText);
   if (meaningfulQueryTokens.length) {
     const index = await buildSiteIndex(env, site);
     let ranked = index
@@ -668,17 +669,92 @@ export async function handleEraMessage(request, env) {
         seen.add(r.chunk.text);
         parts.push(r.chunk.text);
       }
-      await bumpStats(env);
-      return json({ ok: true, reply: parts.join("\n\n"), source: "content" }, env);
+      return { reply: parts.join("\n\n"), source: "content" };
     }
   }
 
-  // 4. fallback — queue for teaching only if learning is currently on
-  const fallback = "I'm not fully sure about that one yet — I've flagged it for the team. For anything urgent, tap Book Now or message us directly and we'll help right away.";
-  const settings = await getSettings(env);
-  if (settings.learningEnabled !== false) {
-    await queueUnanswered(env, site, trimmed);
+  // 4. fallback — nothing found. Caller decides what to do about it
+  //    (queue for teaching, escalate to Telegram, etc).
+  return {
+    reply: "I'm not fully sure about that one yet — I've flagged it for the team. For anything urgent, tap Book Now or message us directly and we'll help right away.",
+    source: "fallback",
+  };
+}
+
+// ---------------------------------------------------------------------
+// POST /api/era/message  { site, sessionId, message }
+// -----------------------------------------------------------------------
+// Every visitor turn now does three things, always, regardless of one
+// another (per the hybrid spec):
+//   1. gets logged against that visitor's conversation
+//   2. gets forwarded to Telegram (§2, §9) — the notification never
+//      depends on whether ERA could answer it
+//   3. gets an AI answer ONLY if the conversation is currently in "ai"
+//      mode; in "human"/"paused" mode ERA stays quiet and a guide
+//      answers from Telegram instead (§4, §5, §17 — no spamming
+//      "please wait" while a human is expected to respond)
+// ---------------------------------------------------------------------
+export async function handleEraMessage(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const { site, sessionId: rawSessionId, message } = body || {};
+
+  if (!message || typeof message !== "string" || !message.trim()) {
+    return json({ ok: false, error: "message is required" }, env, 400);
   }
+  const trimmed = message.trim().slice(0, 600);
+  // Defensive fallback if a caller forgets sessionId — conversations
+  // still work, they just won't survive a page reload.
+  const sessionId = (rawSessionId && String(rawSessionId).slice(0, 64)) || crypto.randomUUID();
+
+  const conversation = await getOrCreateConversation(env, sessionId, site);
+
+  const isNew = conversation.messageCount === 0;
+  const reopened = conversation.status === "closed";
+  if (reopened) conversation.status = "ai"; // a new message reopens a closed chat
+
+  conversation.messageCount += 1;
+
+  let replyText = null;
+  let escalated = false;
+
+  if (conversation.status === "ai") {
+    const result = await computeAiReply(env, site, trimmed, conversation.lastQuestion);
+    replyText = result.reply;
+    escalated = result.source === "fallback";
+    if (escalated) {
+      conversation.needsHuman = true;
+      const settings = await getSettings(env);
+      if (settings.learningEnabled !== false) {
+        await queueUnanswered(env, site, trimmed);
+      }
+    }
+  }
+  // in "human" or "paused" mode: replyText stays null — ERA doesn't
+  // auto-answer, a guide is expected to reply from Telegram instead.
+
+  conversation.lastQuestion = trimmed;
+  await saveConversation(env, conversation);
+
+  await forwardToTelegram(env, conversation, trimmed, replyText, { isNew, escalated, reopened });
   await bumpStats(env);
-  return json({ ok: true, reply: fallback, source: "fallback" }, env);
+
+  return json({ ok: true, reply: replyText, status: conversation.status, convId: conversation.id }, env);
+}
+
+// ---------------------------------------------------------------------
+// GET /api/era/poll?site=...&sessionId=...&since=<timestamp>
+// -----------------------------------------------------------------------
+// The widget polls this while the chat panel is open to pick up
+// anything that arrived after the visitor's own message already got
+// its response — most commonly a human's reply typed in Telegram.
+// ---------------------------------------------------------------------
+export async function handleEraPoll(url, env) {
+  const sessionId = url.searchParams.get("sessionId");
+  if (!sessionId) return json({ ok: false, error: "sessionId is required" }, env, 400);
+  const since = Number(url.searchParams.get("since") || 0);
+
+  const conversation = await getConversation(env, sessionId);
+  const messages = await readOutbox(env, sessionId, since);
+
+  return json({ ok: true, status: conversation ? conversation.status : "ai", messages }, env);
 }
