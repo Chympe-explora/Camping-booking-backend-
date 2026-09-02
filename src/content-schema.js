@@ -751,17 +751,17 @@ export const SCHEMA_DEFAULTS = {
       },
       "nav": {
         "items": [
-          { "label": "Home", "target": 1 },
-          { "label": "Explore", "target": 2 },
-          { "label": "Packages", "target": 2 },
-          { "label": "Gallery", "target": 2 },
-          { "label": "Booking", "target": 2 },
-          { "label": "Contact", "target": 2 }
+          { "label": "Home", "target": "home" },
+          { "label": "Explore", "target": "explore" },
+          { "label": "Packages", "target": "packages" },
+          { "label": "Gallery", "target": "gallery" },
+          { "label": "Booking", "target": "booking" },
+          { "label": "Contact", "target": "contact" }
         ],
         "mobileItems": [
-          { "label": "Home", "target": 1 },
-          { "label": "Packages", "target": 2 },
-          { "label": "Gallery", "target": 2 }
+          { "label": "Home", "target": "home" },
+          { "label": "Packages", "target": "packages" },
+          { "label": "Gallery", "target": "gallery" }
         ]
       },
       "trustBar": {
@@ -1675,17 +1675,17 @@ export const SCHEMA_DEFAULTS = {
       },
       "nav": {
         "items": [
-          { "label": "Home", "target": 1 },
-          { "label": "Explore", "target": 2 },
-          { "label": "Package", "target": 2 },
-          { "label": "Gallery", "target": 2 },
-          { "label": "Booking", "target": 2 },
-          { "label": "Contact", "target": 2 }
+          { "label": "Home", "target": "home" },
+          { "label": "Explore", "target": "explore" },
+          { "label": "Package", "target": "packages" },
+          { "label": "Gallery", "target": "gallery" },
+          { "label": "Booking", "target": "booking" },
+          { "label": "Contact", "target": "contact" }
         ],
         "mobileItems": [
-          { "label": "Home", "target": 1 },
-          { "label": "Package", "target": 2 },
-          { "label": "Gallery", "target": 2 }
+          { "label": "Home", "target": "home" },
+          { "label": "Package", "target": "packages" },
+          { "label": "Gallery", "target": "gallery" }
         ]
       },
       "trustBar": {
