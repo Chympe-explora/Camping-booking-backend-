@@ -12,7 +12,7 @@
  */
 
 import { SCHEMA_DEFAULTS } from "./content-schema.js";
-import { SITES, SITE_LABELS, getDoc, saveDoc, deepMerge, getPath, setPath, getSession, setSession, clearSession } from "./store.js";
+import { SITES, SITE_LABELS, getDoc, saveDoc, deepMerge, getPath, setPath, deletePath, getSession, setSession, clearSession } from "./store.js";
 import { listChildren, humanize, chunk } from "./walker.js";
 import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
@@ -103,6 +103,7 @@ async function sendMainMenu(env, chatId, note) {
   rows.push([btn("🤖 ERA AI Assistant", "eraai")]);
   rows.push([btn("👁️ Preview Live Sites", "preview")]);
   rows.push([btn("📊 Live Stats", "stats")]);
+  rows.push([btn("🧨 Reset EVERYTHING to default", "resetworld")]);
   const text =
     (note ? note + "\n\n" : "") +
     "👑 <b>Website Admin</b>\nWhat do you want to do?";
@@ -362,6 +363,16 @@ async function handleCallback(env, chatId, messageId, data) {
     return resetOneImage(env, chatId, rest.join(":"));
   }
 
+  // ---- generic "reset to default" (content / prices / highlights /
+  // discounts / ratings — images have their own version above) ----
+  if (action === "resetsection") return resetSection(env, chatId);
+  if (action === "resetall") return confirmResetAll(env, chatId);
+  if (action === "resetallconfirm") return resetAllForCurrentTree(env, chatId);
+
+  // ---- the big one: wipe every override, every doc, every site ----
+  if (action === "resetworld") return confirmResetEverything(env, chatId);
+  if (action === "resetworldconfirm") return resetEverything(env, chatId);
+
   if (action === "cancel") {
     const session = await getSession(env, chatId);
     if (session && session.kind === "eraTeach") {
@@ -474,6 +485,18 @@ async function renderTree(env, chatId, session, note) {
   }
   if (session.kind === "images" && session.path.length === 0) {
     rows.push([btn("🔄 Reset ALL photos to default", "resetimages")]);
+  }
+  // Every non-image section gets the same two reset options images
+  // already had: reset just what you're looking at right now, or reset
+  // the whole category (this site's text / highlights / ratings /
+  // prices, or the global discounts) back to what's baked into the
+  // code. This is also the fix if a section ever gets emptied out by
+  // accident (like Destinations did) — open it and tap Reset.
+  if (session.kind !== "images" && session.path.length > 0) {
+    rows.push([btn("↩️ Reset this section to default", "resetsection")]);
+  }
+  if (session.kind !== "images" && session.path.length === 0) {
+    rows.push([btn(`🔄 Reset ALL ${catLabel.replace(/^[^\s]+\s/, "")} to default`, "resetall")]);
   }
   if (session.path.length && Array.isArray(getPath(merged, session.path.slice(0, -1).join(".")) ?? merged)) {
     // current node is an item inside an array one level up — offer delete
@@ -678,6 +701,87 @@ async function resetOneImage(env, chatId, key) {
   delete session.awaiting;
   await setSession(env, chatId, session);
   return renderTree(env, chatId, session, `↩️ ${humanize(key)} reset to default.`);
+}
+
+// ---------------- GENERIC RESET (content / prices / highlights / discounts / ratings) ----------------
+// Same idea as the images reset above, just working off whatever tree
+// the admin is currently browsing instead of being hard-coded to
+// photos. "Reset this section" clears the override at exactly the path
+// you're standing in (e.g. Destinations, or one destination inside it)
+// and falls back to the code's default for that path — everything else
+// on the site, and every other site, is untouched.
+
+async function resetSection(env, chatId) {
+  const session = await getSession(env, chatId);
+  if (!session || session.kind === "images") return sendMainMenu(env, chatId);
+  const docKey = docKeyFor(session.kind, session.site);
+  const base = defaultsFor(session.kind, session.site);
+  const override = await getDoc(env, docKey, Array.isArray(base) ? [] : {});
+  const path = session.path.join(".");
+  deletePath(override, path);
+  await saveDoc(env, docKey, override, { logChange: `Reset "${path || "(top level)"}" to default` });
+  const label = humanize(session.path[session.path.length - 1] || "this section");
+  return renderTree(env, chatId, session, `↩️ ${label} reset to default.`);
+}
+
+// "Reset ALL <category>" is destructive enough (it throws away every
+// tweak made anywhere in that whole document) that it asks for a
+// confirming tap before it actually runs.
+async function confirmResetAll(env, chatId) {
+  const session = await getSession(env, chatId);
+  if (!session) return sendMainMenu(env, chatId);
+  const catLabel = CATEGORIES.find((c) => c.kind === session.kind)?.label || session.kind;
+  const scope = SITE_LABELS[session.site] ? ` for ${SITE_LABELS[session.site]}` : "";
+  await tgSendMessage(
+    env,
+    chatId,
+    `⚠️ This resets <b>everything</b> in ${catLabel}${scope} back to default — every edit you've made in this section, not just the one you're looking at.\n\nAre you sure?`,
+    { reply_markup: kb([[btn("✅ Yes, reset it all", "resetallconfirm")], [btn("❌ Cancel", "cancel")]]) }
+  );
+}
+
+async function resetAllForCurrentTree(env, chatId) {
+  const session = await getSession(env, chatId);
+  if (!session) return sendMainMenu(env, chatId);
+  const docKey = docKeyFor(session.kind, session.site);
+  const base = defaultsFor(session.kind, session.site);
+  await saveDoc(env, docKey, Array.isArray(base) ? [] : {}, {
+    logChange: `Reset ALL of ${session.kind}${session.site ? ":" + session.site : ""} to default`,
+  });
+  session.path = [];
+  await setSession(env, chatId, session);
+  return renderTree(env, chatId, session, "🔄 This whole section is back to default.");
+}
+
+// ---------------- RESET EVERYTHING (the big red button) ----------------
+// Wipes every override doc for every site — text, photos, prices,
+// highlights, ratings, and the global discounts — back to whatever is
+// baked into the code. Two-tap confirm because there's no undo.
+
+async function confirmResetEverything(env, chatId) {
+  await tgSendMessage(
+    env,
+    chatId,
+    "🧨 <b>Reset EVERYTHING?</b>\n\nThis puts the <b>entire website</b> — all text, all photos, all prices, highlights, ratings, and discounts, on all three sites — back to exactly how it is in the code, undoing every change ever made from this bot.\n\nThis cannot be undone. Are you sure?",
+    { reply_markup: kb([[btn("‼️ Yes, reset the whole website", "resetworldconfirm")], [btn("❌ Cancel", "cancel")]]) }
+  );
+}
+
+async function resetEverything(env, chatId) {
+  const perSiteKinds = ["content", "images", "prices", "highlights", "ratings"];
+  for (const site of SITES) {
+    for (const kind of perSiteKinds) {
+      const base = defaultsFor(kind, site);
+      await saveDoc(env, docKeyFor(kind, site), Array.isArray(base) ? [] : {}, {
+        logChange: `Reset ALL ${kind} for ${site} (full site reset)`,
+      });
+    }
+  }
+  await saveDoc(env, "discounts:global", {}, { logChange: "Reset ALL discounts (full site reset)" });
+  await clearSession(env, chatId);
+  await tgSendMessage(env, chatId, "🔄 Done — the whole website is back to its default, out-of-the-box state.", {
+    reply_markup: kb([[btn("🏠 Main Menu", "home")]]),
+  });
 }
 
 // ---------------- ARRAY ADD / DELETE ----------------

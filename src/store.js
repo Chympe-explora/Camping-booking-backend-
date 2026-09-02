@@ -154,6 +154,31 @@ export function setPath(obj, path, value) {
   return obj;
 }
 
+// Removes whatever override lives at `path` (an object key, or an
+// array index) so that path falls back to the code's default again —
+// this is the building block behind every "↩️ Reset to default"
+// button. Unlike setPath, this never creates intermediate objects: if
+// nothing was overridden along the way, it's a no-op.
+export function deletePath(obj, path) {
+  const parts = pathParts(path);
+  if (!parts.length) return obj;
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts[i];
+    if (cur == null || cur[key] === undefined) return obj;
+    cur = cur[key];
+  }
+  const lastKey = parts[parts.length - 1];
+  if (cur == null) return obj;
+  if (Array.isArray(cur)) {
+    const idx = Number(lastKey);
+    if (!Number.isNaN(idx)) cur.splice(idx, 1);
+  } else if (typeof cur === "object") {
+    delete cur[lastKey];
+  }
+  return obj;
+}
+
 export function getPath(obj, path) {
   let cur = obj;
   for (const p of pathParts(path)) {
