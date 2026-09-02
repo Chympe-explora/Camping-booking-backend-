@@ -1,0 +1,26 @@
+{
+  "name": "chympe-booking-backend",
+  "version": "1.0.0",
+  "description": "Booking backend for Krem Chympe adventure site - Cloudflare Workers + Telegram Bot",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail",
+    "login": "wrangler login",
+    "logout": "wrangler logout"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "booking",
+    "telegram"
+  ],
+  "author": "Team Explo Era",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.43.0"
+  },
+  "dependencies": {}
+}
