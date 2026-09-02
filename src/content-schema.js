@@ -28,6 +28,10 @@ export const SCHEMA_DEFAULTS = {
           {
             "label": "About Us",
             "id": "about"
+          },
+          {
+            "label": "Ratings",
+            "id": "ratings"
           }
         ]
       },
@@ -1166,9 +1170,21 @@ export const SCHEMA_DEFAULTS = {
         "visitorsLabel": "Visitors",
         "duration": "Full-Day Trip (3\u20134 Hrs Trek Each Way)",
         "priceLabel": "Starts \u20b91500 Per Guide",
+        "quote": "Symphony in the mist.",
         "videoUrl": "",
+        "videoEnabled": true,
         "fallbackImage": "Blue watefall.jpg",
-        "enabled": true
+        "enabled": true,
+        "discoverLabel": "Discover"
+      },
+      "notice": {
+        "enabled": false,
+        "title": "PUBLIC NOTICE",
+        "subtitle": "",
+        "text": "",
+        "buttonText": "Got it",
+        "iconBg": "#2E8B57",
+        "showAgain": ""
       },
       "backgrounds": [
         "Blue watefall.jpg",
@@ -2086,9 +2102,21 @@ export const SCHEMA_DEFAULTS = {
         "visitorsLabel": "Members",
         "duration": "6 Days, 5 Nights",
         "priceLabel": "\u20b94,999 Per Person",
+        "quote": "Symphony in the mist.",
         "videoUrl": "",
+        "videoEnabled": true,
         "fallbackImage": "hero-river-aerial.jpg",
-        "enabled": true
+        "enabled": true,
+        "discoverLabel": "Discover"
+      },
+      "notice": {
+        "enabled": false,
+        "title": "PUBLIC NOTICE",
+        "subtitle": "",
+        "text": "",
+        "buttonText": "Got it",
+        "iconBg": "#2E8B57",
+        "showAgain": ""
       },
       "backgrounds": [
         "hero-river-aerial.jpg",

@@ -33,10 +33,22 @@
  *     Polled by the widget while the chat panel is open, to pick up
  *     replies a human typed in Telegram after the original request
  *     already completed.
+ *   POST /api/era/typing  { site, sessionId }
+ *     Fired by the widget while the visitor is composing a message
+ *     (before Send) — triggers Telegram's native "…is typing" bubble in
+ *     the admin chat, live, the same way WhatsApp shows it.
  *   Managed entirely from the Telegram admin bot's "🤖 ERA AI" menu
  *   (knowledge base / learning toggle) plus, per-visitor, the
  *   ↩️ Reply / 🤖 AI / 👤 Take Over / ⏸ Pause / 🔴 Close buttons attached
  *   to every forwarded visitor message (see telegram-bot.js).
+ *
+ * Visitor ratings (new) — see ratings.js:
+ *   GET  /api/ratings?site=...     -> { ratings: [...], average, count }
+ *   POST /api/ratings  { site, name, rating, comment, sessionId }
+ *     Stored as an admin-editable list (Telegram is the storage, same as
+ *     highlights/content) — browsable/deletable from the bot's new
+ *     "⭐ Visitor Ratings" menu — and a heads-up message is sent to the
+ *     admin chat the moment a new rating comes in.
  *
  * One shared webhook, routed by which chat the tap came from:
  *   POST /telegram-webhook
@@ -64,7 +76,8 @@
 import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
 import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleAdminResetImages } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
-import { handleEraMessage, handleEraPoll } from "./era-ai.js";
+import { handleEraMessage, handleEraPoll, handleEraTyping } from "./era-ai.js";
+import { handleGetRatings, handleSubmitRating } from "./ratings.js";
 
 export default {
   async fetch(request, env, ctx) {
@@ -101,6 +114,11 @@ export default {
       // ---- ERA AI chat assistant (new) ----
       if (url.pathname === "/api/era/message" && request.method === "POST") return handleEraMessage(request, env);
       if (url.pathname === "/api/era/poll" && request.method === "GET") return handleEraPoll(url, env);
+      if (url.pathname === "/api/era/typing" && request.method === "POST") return handleEraTyping(request, env);
+
+      // ---- visitor ratings (new) ----
+      if (url.pathname === "/api/ratings" && request.method === "GET") return handleGetRatings(url, env);
+      if (url.pathname === "/api/ratings" && request.method === "POST") return handleSubmitRating(request, env);
 
       // ---- one shared Telegram webhook ----
       if (url.pathname === "/telegram-webhook" && request.method === "POST") {

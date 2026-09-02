@@ -1,12 +1,14 @@
 /**
- * conversations.js — the hybrid AI + human-support layer for ERA AI.
+ * conversations.js — the live chat layer between visitors and the admin.
  * -----------------------------------------------------------------------
- * This is what turns era-ai.js from a plain FAQ bot into the system
- * described in the ERA AI spec: every visitor gets a stable short ID,
- * EVERY message they send is forwarded to the Telegram admin chat (not
- * just the ones ERA can't answer), and an admin can reply to a specific
- * visitor or flip their conversation between AI / Human / Paused /
- * Closed at any time, straight from Telegram.
+ * Every visitor gets a stable short ID, and EVERY message they send is
+ * forwarded straight to the Telegram admin chat. By default a
+ * conversation is plain manual chat: nothing auto-replies until the
+ * admin types a reply in Telegram. The admin can optionally flip a
+ * specific visitor's conversation to AI / Human / Paused / Closed at
+ * any time, straight from Telegram — "AI" hands that one conversation
+ * to era-ai.js's knowledge-base auto-responder; every other state
+ * leaves it as a plain human-to-human chat.
  *
  * Storage split, deliberately different from store.js's doc pattern:
  *   - store.js's getDoc/saveDoc treats a Telegram message as the
@@ -35,7 +37,7 @@
  * panel is open.
  */
 
-import { tgSendMessage, kb, btn } from "./telegram.js";
+import { tgSendMessage, tgSendChatAction, kb, btn } from "./telegram.js";
 
 const START_ID = 1047; // cosmetic — matches the spec's example IDs
 const TGMSG_TTL = 60 * 60 * 24 * 30; // 30 days
@@ -83,7 +85,13 @@ export async function getOrCreateConversation(env, sessionId, site) {
     id,
     sessionId,
     site: site || "root",
-    status: "ai", // "ai" | "human" | "paused" | "closed"
+    // Every new visitor chat starts in "human" mode: nothing auto-replies,
+    // the message just goes straight to Telegram and waits for the admin
+    // to type a reply there. An admin can still flip a specific
+    // conversation to "🤖 AI" from Telegram if they want the knowledge-base
+    // auto-responder for that visitor, but that's now opt-in per
+    // conversation, not the default. "ai" | "human" | "paused" | "closed"
+    status: "human",
     needsHuman: false,
     createdAt: Date.now(),
     lastActivity: Date.now(),
@@ -147,6 +155,16 @@ export async function readOutbox(env, sessionId, since) {
 // ---------------------------------------------------------------------
 function adminChatId(env) {
   return env.TELEGRAM_ADMIN_CHAT_ID || env.TELEGRAM_CHAT_ID;
+}
+
+// Native Telegram "…is typing" bubble in the admin chat — the same
+// WhatsApp-style live signal, triggered while a visitor is actively
+// composing a message in the chat widget (before they hit send). Fails
+// silently: a missed typing bubble should never break the chat itself.
+export async function notifyTyping(env) {
+  const chatId = adminChatId(env);
+  if (!chatId) return;
+  await tgSendChatAction(env, chatId, "typing").catch(() => {});
 }
 
 function convButtons(sessionId) {

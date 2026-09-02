@@ -63,6 +63,21 @@ export async function tgAnswerCallbackQuery(env, callbackQueryId, text, showAler
   });
 }
 
+// Triggers Telegram's native "‹bot name› is typing…" bubble in a chat —
+// exactly the animation WhatsApp/Telegram show while someone is composing
+// a message. Telegram auto-clears it after ~5 seconds (or the instant a
+// real message/edit lands), so callers just re-send it every so often
+// while the visitor is actively typing/filling a form — no cleanup call
+// needed. Fails silently: a missed typing indicator should never break
+// anything else.
+export async function tgSendChatAction(env, chatId, action) {
+  try {
+    return await tg(env, "sendChatAction", { chat_id: chatId, action: action || "typing" });
+  } catch (e) {
+    return { ok: false };
+  }
+}
+
 export async function tgSendPhotoByFileId(env, chatId, fileId, caption) {
   return tg(env, "sendPhoto", { chat_id: chatId, photo: fileId, caption, parse_mode: "HTML" });
 }

@@ -101,6 +101,20 @@ async function tgEditMessageCaption(env, messageId, caption) {
   });
 }
 
+// Triggers Telegram's native "…is typing" bubble in the admin chat — the
+// same WhatsApp-style live indicator, just driven by a visitor filling in
+// the booking form instead of a chat message. Telegram clears it on its
+// own after ~5 seconds, so this just needs to be re-sent while the
+// visitor keeps typing (handleDraft already fires on every field change).
+// Fails silently — a missed typing bubble should never break a booking.
+async function tgTyping(env) {
+  try {
+    return await tg(env, "sendChatAction", { chat_id: env.TELEGRAM_CHAT_ID, action: "typing" });
+  } catch (e) {
+    return { ok: false };
+  }
+}
+
 function fmtData(data) {
   return Object.entries(data || {})
     .filter(([, v]) => v !== undefined && v !== null && v !== "")
@@ -148,6 +162,12 @@ export async function handleTap(request, env) {
 export async function handleDraft(request, env) {
   const { sessionId, siteId, data } = await request.json();
   if (!sessionId) return json({ ok: false }, env, 400);
+
+  // Fire the native "typing…" bubble every time a draft update comes in —
+  // this is what happens while the visitor is actively filling the form
+  // (and immediately again the moment they tap Next/Back to a new step),
+  // giving the admin the same live, WhatsApp-style typing signal as chat.
+  await tgTyping(env);
 
   const text = `\u270f\ufe0f <b>Draft — ${escapeHtml(siteId || "site")}</b>\n${fmtData(data)}`;
   const existingMsgId = await env.BOOKINGS.get(`draftmsg:${sessionId}`);

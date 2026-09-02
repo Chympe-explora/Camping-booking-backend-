@@ -1,7 +1,12 @@
 /**
- * era-ai.js — "ERA AI", the visitor-facing chat assistant for the Team
- * Chympe Explora sites, plus the knowledge-base + learning controls
- * exposed through the Telegram admin bot.
+ * era-ai.js — the optional knowledge-base auto-responder behind "ERA
+ * AI", plus the learning controls exposed through the Telegram admin
+ * bot. As of the live-chat-first redesign, every new visitor
+ * conversation defaults to plain manual chat with the admin (see
+ * conversations.js) — nothing here answers automatically unless the
+ * admin has explicitly switched that specific conversation to "🤖 AI"
+ * from Telegram. This file is what runs when a conversation IS in that
+ * mode.
  * -----------------------------------------------------------------------
  * How it answers:
  *   1. LIVE INTENTS — pricing, refund policy, contact details, guide info
@@ -61,7 +66,7 @@
 import { SCHEMA_DEFAULTS } from "./content-schema.js";
 import { isValidSite, getDoc, saveDoc, deepMerge } from "./store.js";
 import { json } from "./booking.js";
-import { getOrCreateConversation, saveConversation, getConversation, forwardToTelegram, readOutbox } from "./conversations.js";
+import { getOrCreateConversation, saveConversation, getConversation, forwardToTelegram, readOutbox, notifyTyping } from "./conversations.js";
 
 const KNOWLEDGE_DOC = "eraKnowledge:global"; // admin-taught Q&A pairs (the "learned" layer)
 const SETTINGS_DOC = "eraSettings:global"; // { learningEnabled }
@@ -710,7 +715,11 @@ export async function handleEraMessage(request, env) {
 
   const isNew = conversation.messageCount === 0;
   const reopened = conversation.status === "closed";
-  if (reopened) conversation.status = "ai"; // a new message reopens a closed chat
+  // A new message reopens a closed chat back into plain human/manual mode
+  // — not AI — so it never starts auto-replying on its own; the admin
+  // sees it land in Telegram and can reply, or explicitly tap "🤖 AI" to
+  // hand this particular visitor to the auto-responder.
+  if (reopened) conversation.status = "human";
 
   conversation.messageCount += 1;
 
@@ -739,6 +748,21 @@ export async function handleEraMessage(request, env) {
   await bumpStats(env);
 
   return json({ ok: true, reply: replyText, status: conversation.status, convId: conversation.id }, env);
+}
+
+// ---------------------------------------------------------------------
+// POST /api/era/typing  { site, sessionId }
+// -----------------------------------------------------------------------
+// Fired by the widget while the visitor is actively composing a message
+// (before they hit send) — triggers Telegram's native "…is typing"
+// bubble in the admin chat, the same live signal WhatsApp shows. No
+// conversation state changes here; this is purely a transient UI cue.
+// ---------------------------------------------------------------------
+export async function handleEraTyping(request, env) {
+  const body = await request.json().catch(() => ({}));
+  if (!body || !body.sessionId) return json({ ok: false }, env, 400);
+  await notifyTyping(env);
+  return json({ ok: true }, env);
 }
 
 // ---------------------------------------------------------------------

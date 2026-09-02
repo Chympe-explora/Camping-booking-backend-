@@ -26,6 +26,7 @@ const CATEGORIES = [
   { kind: "prices", label: "💰 Edit Prices", perSite: true, sites: ["krem-chympe", "wilderness-expedition"] },
   { kind: "discounts", label: "🏷️ Discounts & Sales", perSite: false },
   { kind: "highlights", label: "🌟 Highlights / Banner", perSite: true },
+  { kind: "ratings", label: "⭐ Visitor Ratings", perSite: true },
 ];
 
 function isAdmin(env, userId) {
@@ -131,9 +132,11 @@ async function sendEraMenu(env, chatId) {
     `Info notes fed in: <b>${status.notesCount}</b>\n` +
     `Questions waiting for an answer: <b>${status.pendingCount}</b>\n` +
     `Messages answered so far: <b>${status.totalMessages}</b>\n\n` +
+    `Every new visitor chat is now a plain live chat with you by default — nothing auto-replies until you open Telegram and answer it. ` +
+    `ERA AI only answers in a conversation you've explicitly switched to "🤖 AI" from that visitor's message (see the buttons under each visitor message).\n\n` +
     (status.learningEnabled
-      ? "ERA AI is answering visitors and saving anything it can't answer, so you can teach it later."
-      : "ERA AI is still answering visitors exactly as normal — it's just paused building new knowledge. Nothing new gets queued or auto-learned until you turn it back on.");
+      ? "Learning is ON: whenever ERA AI is handling a conversation and can't confidently answer something, that question gets saved below so you can teach it."
+      : "Learning is PAUSED: ERA AI (in any conversation you've switched it on for) keeps using what it already knows, but nothing new gets queued or auto-learned until you turn learning back on.");
   const rows = [
     [btn("📚 Bulk Teach Q&A", "erabulk")],
     [btn(status.learningEnabled ? "⏸️ Stop Learning" : "▶️ Resume Learning", "eratogglelearn")],
@@ -413,6 +416,7 @@ async function sendPreviewLinks(env, chatId) {
 function defaultsFor(kind, site) {
   if (kind === "discounts") return DEFAULT_DISCOUNTS;
   if (kind === "highlights") return [];
+  if (kind === "ratings") return [];
   const schema = SCHEMA_DEFAULTS[site];
   if (!schema) return {};
   if (kind === "content") return schema.KC_CONTENT || {};

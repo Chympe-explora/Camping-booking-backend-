@@ -62,6 +62,7 @@ const DOC_TITLES = {
   discounts: "🏷️ DISCOUNTS & SALES",
   highlights: "🌟 HIGHLIGHTS",
   images: "🖼️ IMAGE MAP (key → telegram file_id)",
+  ratings: "⭐ VISITOR RATINGS",
 };
 
 export async function getDoc(env, docKey, fallback) {
