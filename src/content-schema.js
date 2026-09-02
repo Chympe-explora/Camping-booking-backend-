@@ -45,7 +45,8 @@ export const SCHEMA_DEFAULTS = {
         "fallbackImage": "Trek Trail Mist.jpg",
         "enabled": true,
         "discoverLabel": "Discover",
-        "discoverTargetId": "destinations"
+        "discoverTargetId": "destinations",
+        "bookNowTargetId": "destinations"
       },
       "notice": {
         "enabled": false,
@@ -750,17 +751,17 @@ export const SCHEMA_DEFAULTS = {
       },
       "nav": {
         "items": [
-          "Home",
-          "Explore",
-          "Packages",
-          "Gallery",
-          "Booking",
-          "Contact"
+          { "label": "Home", "target": 1 },
+          { "label": "Explore", "target": 2 },
+          { "label": "Packages", "target": 2 },
+          { "label": "Gallery", "target": 2 },
+          { "label": "Booking", "target": 2 },
+          { "label": "Contact", "target": 2 }
         ],
         "mobileItems": [
-          "Home",
-          "Packages",
-          "Gallery"
+          { "label": "Home", "target": 1 },
+          { "label": "Packages", "target": 2 },
+          { "label": "Gallery", "target": 2 }
         ]
       },
       "trustBar": {
@@ -1674,17 +1675,17 @@ export const SCHEMA_DEFAULTS = {
       },
       "nav": {
         "items": [
-          "Home",
-          "Explore",
-          "Package",
-          "Gallery",
-          "Booking",
-          "Contact"
+          { "label": "Home", "target": 1 },
+          { "label": "Explore", "target": 2 },
+          { "label": "Package", "target": 2 },
+          { "label": "Gallery", "target": 2 },
+          { "label": "Booking", "target": 2 },
+          { "label": "Contact", "target": 2 }
         ],
         "mobileItems": [
-          "Home",
-          "Package",
-          "Gallery"
+          { "label": "Home", "target": 1 },
+          { "label": "Package", "target": 2 },
+          { "label": "Gallery", "target": 2 }
         ]
       },
       "trustBar": {

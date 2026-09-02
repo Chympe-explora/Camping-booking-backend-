@@ -351,6 +351,14 @@ async function handleCallback(env, chatId, messageId, data) {
     return addArrayItem(env, chatId);
   }
 
+  if (action === "moveup") {
+    return moveItem(env, chatId, rest.join(":"), -1);
+  }
+
+  if (action === "movedown") {
+    return moveItem(env, chatId, rest.join(":"), 1);
+  }
+
   if (action === "del") {
     return deleteChild(env, chatId, rest.join(":"));
   }
@@ -476,7 +484,16 @@ async function renderTree(env, chatId, session, note) {
       }
       const label = `${iconFor(child.kind, session.kind)} ${humanize(child.key)} — ${child.preview}`;
       const cb = child.kind === "object" || child.kind === "array" ? `into:${child.key}` : `edit:${child.key}`;
-      rows.push([btn(truncateLabel(label), cb)]);
+      const row = [btn(truncateLabel(label), cb)];
+      // Reordering: only offered for items that live directly inside an
+      // array (nav items, highlights, meals, ...) — not for object
+      // fields. First item has no "up", last has no "down".
+      if (Array.isArray(node)) {
+        const idx = Number(child.key);
+        if (idx > 0) row.push(btn("⬆️", `moveup:${child.key}`));
+        if (idx < node.length - 1) row.push(btn("⬇️", `movedown:${child.key}`));
+      }
+      rows.push(row);
     }
   }
 
@@ -811,6 +828,32 @@ function clearStringsDeep(obj) {
       else clearStringsDeep(obj[k]);
     }
   }
+}
+
+// ---------------- REORDER AN ITEM (nav items, highlights, meals, ...) ----------------
+// Swaps an array item with its neighbor and re-saves — the ⬆️/⬇️
+// buttons next to each row in renderTree. Same "save the merged view"
+// convention as addArrayItem above, so a reorder always sticks even if
+// nothing else on that item was ever overridden before.
+async function moveItem(env, chatId, indexStr, delta) {
+  const session = await getSession(env, chatId);
+  if (!session) return sendMainMenu(env, chatId);
+  const { docKey, merged } = await loadMerged(env, session.kind, session.site);
+  const arr = session.path.length ? getPath(merged, session.path.join(".")) : merged;
+  if (!Array.isArray(arr)) return renderTree(env, chatId, session);
+
+  const idx = Number(indexStr);
+  const newIdx = idx + delta;
+  if (Number.isNaN(idx) || newIdx < 0 || newIdx >= arr.length) return renderTree(env, chatId, session);
+
+  const tmp = arr[idx];
+  arr[idx] = arr[newIdx];
+  arr[newIdx] = tmp;
+
+  await saveDoc(env, docKey, merged, {
+    logChange: `Reordered item #${idx + 1} \u2194 #${newIdx + 1} in ${session.path.join(".") || "(top level)"}`,
+  });
+  await renderTree(env, chatId, session, "\ud83d\udd00 Reordered.");
 }
 
 async function deleteChild(env, chatId, keyAndSelf) {
