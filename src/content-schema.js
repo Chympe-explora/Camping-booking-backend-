@@ -11,27 +11,27 @@ export const SCHEMA_DEFAULTS = {
         "items": [
           {
             "label": "Home",
-            "id": "home"
+            "target": "home"
           },
           {
             "label": "Destinations",
-            "id": "destinations"
+            "target": "destinations"
           },
           {
             "label": "Experiences",
-            "id": "experiences"
+            "target": "experiences"
           },
           {
             "label": "Booking",
-            "id": "booking"
+            "target": "booking"
           },
           {
             "label": "About Us",
-            "id": "about"
+            "target": "about"
           },
           {
             "label": "Ratings",
-            "id": "ratings"
+            "target": "ratings"
           }
         ]
       },
