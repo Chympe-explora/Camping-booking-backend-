@@ -107,14 +107,27 @@ export async function getOrCreateConversation(env, sessionId, site) {
     messageCount: 0,
     lastQuestion: "",
   };
-  await kvSet(env, `conv:${sessionId}`, conv);
-  await env.BOOKINGS.put(`convid:${id}`, sessionId);
+  // 90-day TTL, reset on every save (see saveConversation below) — an
+  // active visitor's conversation never expires (each new message
+  // pushes it out another 90 days), but one that goes quiet ages out on
+  // its own. This is what keeps storage from growing forever without
+  // needing any "delete old stuff" button — Cloudflare KV does the
+  // deleting for us, right on schedule, automatically.
+  const CONV_TTL = 60 * 60 * 24 * 90;
+  await kvSet(env, `conv:${sessionId}`, conv, { expirationTtl: CONV_TTL });
+  await env.BOOKINGS.put(`convid:${id}`, sessionId, { expirationTtl: CONV_TTL });
   return conv;
 }
 
 export async function saveConversation(env, conv) {
   conv.lastActivity = Date.now();
-  await kvSet(env, `conv:${conv.sessionId}`, conv);
+  const CONV_TTL = 60 * 60 * 24 * 90;
+  await kvSet(env, `conv:${conv.sessionId}`, conv, { expirationTtl: CONV_TTL });
+  // Keep the short-id lookup (used by Telegram's "Reply" flow) alive as
+  // long as the conversation itself is — otherwise it could quietly
+  // expire on its own 90-day clock even while the conversation is still
+  // active and getting its own clock reset above.
+  if (conv.id) await env.BOOKINGS.put(`convid:${conv.id}`, conv.sessionId, { expirationTtl: CONV_TTL }).catch(() => {});
 }
 
 export async function setConversationStatus(env, sessionId, status) {

@@ -98,7 +98,8 @@ export const SCHEMA_DEFAULTS = {
         "discoverLabel": "Discover",
         "discoverTargetId": "destinations",
         "bookNowLabel": "Explore",
-        "bookNowTargetId": "destinations"
+        "bookNowTargetId": "destinations",
+        "bookNowLink": ""
       },
       "headerCta": {
         "label": "Book Now",
@@ -1234,7 +1235,8 @@ export const SCHEMA_DEFAULTS = {
         "enabled": true,
         "discoverLabel": "Discover",
         "bookNowLabel": "Explore",
-        "bookNowTargetPage": 2
+        "bookNowTargetPage": 2,
+        "bookNowLink": ""
       },
       "headerCta": {
         "targetPage": 2
@@ -2193,7 +2195,8 @@ export const SCHEMA_DEFAULTS = {
         "fallbackImage": "hero-river-aerial.jpg",
         "enabled": true,
         "discoverLabel": "Discover",
-        "bookNowLabel": "Explore"
+        "bookNowLabel": "Explore",
+        "bookNowLink": ""
       },
       "headerCta": {
         "targetPage": 2

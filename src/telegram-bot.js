@@ -20,6 +20,14 @@ import { getLiveStats, resetStats } from "./stats.js";
 import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
 import { getConversation, getConversationByShortId, setConversationStatus, toggleConversationActive, toggleSessionBlocked, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
 
+// The Worker's own public URL — used to build the /media-video proxy
+// link an uploaded background video is served from (see
+// content-api.js's handleVideoMedia). Same domain the frontend's
+// booking-bridge.js already calls for /api/*. If this project is ever
+// moved to a custom domain, set a WORKER_BASE_URL env var and that
+// takes priority over this fallback — see its one use below.
+const DEFAULT_WORKER_BASE_URL = "https://chympe-booking-backend.senlysuchiang87.workers.dev";
+
 const CATEGORIES = [
   { kind: "content", label: "✏️ Edit Website Text", perSite: true },
   { kind: "images", label: "🖼️ Change Photos", perSite: true },
@@ -48,7 +56,7 @@ function isAdmin(env, userId) {
 // ADMIN_USER_IDS, which isn't writable at runtime anyway) means adding
 // or removing a guide takes effect immediately, no redeploy needed.
 // ---------------------------------------------------------------------
-async function getGuides(env) {
+export async function getGuides(env) {
   const raw = await env.BOOKINGS.get("guides:list");
   if (!raw) return [];
   try {
@@ -108,16 +116,18 @@ async function tryRedeemGuideCode(env, chatId, userId, msg) {
     await saveGuides(env, guides);
   }
 
-  // Best-effort: hand them a link straight into the booking group too,
-  // so "access to future bookings" means actually seeing them land, not
-  // just bot-menu access. Silently skipped if the bot isn't an admin in
-  // that chat (or it's a 1:1 chat with no invite link) — never blocks
-  // the rest of the welcome message.
+  // Best-effort: also hand them a link into the booking group chat, in
+  // case they want the shared history/discussion too. Not required for
+  // bookings to reach them though — every new booking now gets sent
+  // directly here, to this DM, with working Confirm/Reject buttons (see
+  // recipientChatIds in booking.js). Silently skipped if the bot isn't
+  // an admin in that group (or it's a 1:1 chat with no invite link) —
+  // never blocks the rest of the welcome message.
   let inviteLine = "";
   if (env.TELEGRAM_CHAT_ID) {
     try {
       const invite = await tg(env, "exportChatInviteLink", { chat_id: env.TELEGRAM_CHAT_ID });
-      if (invite && invite.ok && invite.result) inviteLine = `\n\n📎 Join the booking chat here: ${invite.result}`;
+      if (invite && invite.ok && invite.result) inviteLine = `\n\n📎 You can also join the booking group chat here: ${invite.result}`;
     } catch (e) {
       /* no invite link available — that's fine, admin can add them manually */
     }
@@ -126,7 +136,7 @@ async function tryRedeemGuideCode(env, chatId, userId, msg) {
   await tgSendMessage(
     env,
     chatId,
-    `✅ You're in, ${escapeHtml(name)}! You now have admin bot access — same menus as any other admin, including marking a visitor's chat 🟢 Active / ⚪ Not Active.${inviteLine}`
+    `✅ You're in, ${escapeHtml(name)}! From now on, every new booking will be sent right here with its own ✅ Confirm / ❌ Reject buttons and all the trip details — tap either one and it's settled everywhere at once. You also get the same admin bot menus as anyone else, including marking a visitor's chat 🟢 Active / ⚪ Not Active.${inviteLine}`
   );
   await sendMainMenu(env, chatId, "Welcome! Tap a button to get started 👇");
   return true;
@@ -234,6 +244,8 @@ async function sendMainMenu(env, chatId, note) {
   // don't have to know those keys exist to find them.
   rows.push([btn("🎬 Background Manager", "bgpick")]);
   rows.push([btn("🧱 Section Styling", "secpick")]);
+  rows.push([btn("🔘 Hero Button (text & link)", "herobtnpick")]);
+  rows.push([btn("📹 Upload Background Video", "vidpick")]);
   rows.push([btn("👥 Manage Guides", "guides")]);
   rows.push([btn("🔑 Generate Access Code", "gencode")]);
   rows.push([btn("🤖 ERA AI Assistant", "eraai")]);
@@ -486,8 +498,9 @@ async function handleCallback(env, chatId, messageId, data) {
 
   if (action === "bgpick") return sendSitePicker(env, chatId, "bgshortcut", SITES);
   if (action === "secpick") return sendSitePicker(env, chatId, "secshortcut", SITES);
+  if (action === "herobtnpick") return sendSitePicker(env, chatId, "herobtnshortcut", SITES);
   if (action === "gencode") return generateAccessCode(env, chatId);
-  if (action === "guides") return sendGuidesMenu(env, chatId);
+  if (action === "vidpick") return sendSitePicker(env, chatId, "vidupload", SITES);  if (action === "guides") return sendGuidesMenu(env, chatId);
   if (action === "guiderm") return removeGuide(env, chatId, rest.join(":"));
 
   if (action === "pick") {
@@ -507,10 +520,11 @@ async function handleCallback(env, chatId, messageId, data) {
   // unchanged, and — critically — "Reset ALL" from this shortcut still
   // means "reset all of Website Text", never a separate/smaller scope
   // that could desync from what actually renders on the site.
-  const SHORTCUT_START_PATHS = { bgshortcut: ["background"], secshortcut: ["sectionStyles"] };
+  const SHORTCUT_START_PATHS = { bgshortcut: ["background"], secshortcut: ["sectionStyles"], herobtnshortcut: ["hero"] };
 
   if (action === "site") {
     const [kind, site] = rest;
+    if (kind === "vidupload") return startVideoUpload(env, chatId, site);
     const startPath = SHORTCUT_START_PATHS[kind];
     if (startPath) return openTree(env, chatId, { kind: "content", site, path: [...startPath] });
     return openTree(env, chatId, { kind, site, path: [] });
@@ -754,6 +768,20 @@ async function toggleBoolean(env, chatId, key) {
 
 // ---------------- EDIT A LEAF ----------------
 
+// Starts the "upload a background video from your phone" flow — a
+// dedicated one-off session (not tied to the generic content tree),
+// since a video upload isn't editing one leaf value, it's replacing a
+// whole file and re-pointing background.global.videoUrl at it.
+async function startVideoUpload(env, chatId, site) {
+  await setSession(env, chatId, { awaiting: { type: "video", site } });
+  await tgSendMessage(
+    env,
+    chatId,
+    `🎬 <b>New background video — ${SITE_LABELS[site] || site}</b>\n\nSend the video now, right here in this chat (as a normal video message, not a document). It'll replace the current site-wide background video and go live immediately — no other steps needed.\n\n<i>Telegram caps bot uploads at 50MB — if yours is bigger, compress it first.</i>`,
+    { reply_markup: kb([[btn("❌ Cancel", "cancel")]]) }
+  );
+}
+
 async function startEdit(env, chatId, key) {
   const session = await getSession(env, chatId);
   if (!session) return sendMainMenu(env, chatId, "Session expired, starting over.");
@@ -830,6 +858,44 @@ async function handleAwaitedInput(env, chatId, session, msg) {
     await tgSendMessage(env, chatId, "✅ ERA AI learned that answer! It'll use it next time this question comes up.", {
       reply_markup: kb([[btn("⬅️ Back to ERA AI", "eraai")]]),
     });
+    return;
+  }
+
+  if (awaiting.type === "video") {
+    const video = msg.video || (msg.document && /^video\//.test(msg.document.mime_type || "") ? msg.document : null);
+    if (!video) {
+      await tgSendMessage(env, chatId, "That's not a video — please send it as a normal video message, or tap Cancel.", {
+        reply_markup: kb([[btn("❌ Cancel", "cancel")]]),
+      });
+      return;
+    }
+    const site = awaiting.site;
+    const fileId = video.file_id;
+
+    // Store the raw file_id (same pattern as images), then re-point
+    // background.global.videoUrl at the stable proxy route that
+    // resolves it fresh on every request — see content-api.js's
+    // handleVideoMedia. This is what makes it "go live automatically":
+    // the website already reads background.global.videoUrl on every
+    // load, it just now points here instead of a static filename.
+    const videosDoc = await getDoc(env, `videos:${site}`, {});
+    videosDoc.global = fileId;
+    await saveDoc(env, `videos:${site}`, videosDoc, { logChange: "Uploaded new background video" });
+
+    const proxyUrl = `${env.WORKER_BASE_URL || DEFAULT_WORKER_BASE_URL}/media-video/${site}/global`;
+    const override = await getDoc(env, `content:${site}`, {});
+    setPath(override, "background.global.videoUrl", proxyUrl);
+    setPath(override, "background.global.videoEnabled", true);
+    setPath(override, "background.global.enabled", true);
+    await saveDoc(env, `content:${site}`, override, { logChange: "Background video → uploaded via Telegram" });
+
+    await clearSession(env, chatId);
+    await tgSendMessage(
+      env,
+      chatId,
+      `✅ New background video is live on <b>${SITE_LABELS[site] || site}</b> right now — no other steps needed.`,
+      { reply_markup: kb([[btn("⬅️ Main Menu", "home")]]) }
+    );
     return;
   }
 

@@ -31,6 +31,7 @@
 
 import { bumpVisitors, bumpBookings } from "./stats.js";
 import { isSessionActive, isSessionBlocked, toggleSessionBlocked } from "./conversations.js";
+import { getGuides } from "./telegram-bot.js";
 
 export function corsHeaders(env) {
   return {
@@ -75,9 +76,9 @@ async function tgSendPhotoOrDoc(env, formFields, file) {
 // re-upload needed. Used to attach the receipt the visitor already sent
 // to the final booking message. photo captions are capped at 1024 chars
 // by Telegram, so callers must check length before relying on this.
-async function tgSendPhotoByIdWithButtons(env, fileId, caption, replyMarkup, silent) {
+async function tgSendPhotoByIdWithButtons(env, fileId, caption, replyMarkup, silent, chatId) {
   return tg(env, "sendPhoto", {
-    chat_id: env.TELEGRAM_CHAT_ID,
+    chat_id: chatId || env.TELEGRAM_CHAT_ID,
     photo: fileId,
     caption,
     parse_mode: "HTML",
@@ -85,9 +86,9 @@ async function tgSendPhotoByIdWithButtons(env, fileId, caption, replyMarkup, sil
     disable_notification: !!silent,
   });
 }
-async function tgSendDocumentByIdWithButtons(env, fileId, caption, replyMarkup, silent) {
+async function tgSendDocumentByIdWithButtons(env, fileId, caption, replyMarkup, silent, chatId) {
   return tg(env, "sendDocument", {
-    chat_id: env.TELEGRAM_CHAT_ID,
+    chat_id: chatId || env.TELEGRAM_CHAT_ID,
     document: fileId,
     caption,
     parse_mode: "HTML",
@@ -95,9 +96,9 @@ async function tgSendDocumentByIdWithButtons(env, fileId, caption, replyMarkup, 
     disable_notification: !!silent,
   });
 }
-async function tgEditMessageCaption(env, messageId, caption) {
+async function tgEditMessageCaption(env, chatId, messageId, caption) {
   return tg(env, "editMessageCaption", {
-    chat_id: env.TELEGRAM_CHAT_ID,
+    chat_id: chatId || env.TELEGRAM_CHAT_ID,
     message_id: messageId,
     caption,
     parse_mode: "HTML",
@@ -260,6 +261,51 @@ export async function handleReceipt(request, env) {
   return json({ ok: !!res.ok, error: res.ok ? undefined : (res.description || "telegram send failed") }, env, res.ok ? 200 : 502);
 }
 
+// Recipients for a booking message: the main group chat, PLUS every
+// guide who has redeemed a "🔑 Generate Access Code" (see
+// telegram-bot.js) — each guide gets their own personal copy, in their
+// own DM with the bot, with working Confirm/Reject buttons. Whichever
+// copy gets tapped first resolves the booking everywhere (see
+// broadcastEdit in handleBookingCallback below), so two guides can
+// never accidentally confirm and reject the same booking.
+async function recipientChatIds(env) {
+  const ids = [];
+  if (env.TELEGRAM_CHAT_ID) ids.push(String(env.TELEGRAM_CHAT_ID));
+  try {
+    const guides = await getGuides(env);
+    for (const g of guides) {
+      const id = String(g.userId);
+      if (!ids.includes(id)) ids.push(id);
+    }
+  } catch (e) {
+    /* guide list unavailable — booking still reaches the main group */
+  }
+  return ids;
+}
+
+// Sends one booking (text + Confirm/Reject buttons, optionally with a
+// receipt photo/doc) to a single chat id, handling the same three
+// shapes handleSubmit always has: receipt fits in the caption, receipt
+// too long for a caption (sent separately, details+buttons follow), or
+// no receipt at all. Returns the send result for that chat id's main
+// (buttoned) message specifically, so the caller can track message ids
+// per recipient for later edits.
+async function sendBookingToOne(env, chatId, text, replyMarkup, receipt, silent) {
+  if (receipt && text.length <= 1024) {
+    return receipt.isImage
+      ? tgSendPhotoByIdWithButtons(env, receipt.fileId, text, replyMarkup, silent, chatId)
+      : tgSendDocumentByIdWithButtons(env, receipt.fileId, text, replyMarkup, silent, chatId);
+  }
+  if (receipt) {
+    const shortCaption = `\ud83e\uddfe <b>Payment Receipt</b>`;
+    (receipt.isImage
+      ? tgSendPhotoByIdWithButtons(env, receipt.fileId, shortCaption, undefined, silent, chatId)
+      : tgSendDocumentByIdWithButtons(env, receipt.fileId, shortCaption, undefined, silent, chatId)
+    ).catch(() => {});
+  }
+  return tg(env, "sendMessage", { chat_id: chatId, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: !!silent });
+}
+
 // A submitted booking gets its own bookingId (used by the browser to poll
 // status) and its own Telegram message with inline Confirm/Reject buttons.
 // The bookingId <-> Telegram message id mapping and the full booking data
@@ -328,38 +374,31 @@ export async function handleSubmit(request, env, ctx) {
   // If this visitor is currently marked 🟢 Active from Telegram (see
   // conversations.js), an admin already has eyes on them directly, so
   // this booking message is sent silently (no notification sound/badge)
-  // instead of being skipped outright — it still lands in the group
-  // with working Confirm/Reject buttons, it just doesn't interrupt
-  // anyone. When not active, this behaves exactly as it always has.
+  // instead of being skipped outright — it still lands everywhere (main
+  // group + every guide's DM) with working Confirm/Reject buttons, it
+  // just doesn't interrupt anyone. When not active, this behaves
+  // exactly as it always has.
   const activeElsewhere = sessionId ? await isSessionActive(env, sessionId) : false;
 
   // If this visitor already uploaded a payment receipt (during the Pay
   // Now step), re-attach that SAME Telegram file (no re-upload) to this
   // booking message so the guide sees the receipt and the Confirm/Reject
-  // buttons together, in one place. Telegram photo/document captions are
-  // capped at 1024 chars — if the itemized breakdown is longer than that,
-  // send the receipt with a short caption and the full details as a
-  // separate message right after it (with the buttons), rather than let
-  // sendPhoto fail outright.
+  // buttons together, in one place.
   const receiptRaw = sessionId ? await env.BOOKINGS.get(`receiptfile:${sessionId}`) : null;
   const receipt = receiptRaw ? JSON.parse(receiptRaw) : null;
 
-  let res;
-  if (receipt && text.length <= 1024) {
-    res = receipt.isImage
-      ? await tgSendPhotoByIdWithButtons(env, receipt.fileId, text, replyMarkup, activeElsewhere)
-      : await tgSendDocumentByIdWithButtons(env, receipt.fileId, text, replyMarkup, activeElsewhere);
-  } else if (receipt) {
-    // Receipt shown first (short caption), full details + buttons follow.
-    const shortCaption = `\ud83e\uddfe <b>Payment Receipt</b> — ref ${bookingId}`;
-    (receipt.isImage
-      ? tgSendPhotoByIdWithButtons(env, receipt.fileId, shortCaption, undefined, activeElsewhere)
-      : tgSendDocumentByIdWithButtons(env, receipt.fileId, shortCaption, undefined, activeElsewhere)
-    ).catch(() => {});
-    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: activeElsewhere });
-  } else {
-    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: activeElsewhere });
+  const recipients = await recipientChatIds(env);
+  if (recipients.length === 0) {
+    return json({ ok: false, error: "No Telegram chat is configured to receive bookings." }, env, 502);
   }
+
+  // The FIRST recipient (the main group) is the one whose success/
+  // failure actually gets reported back to the visitor — same
+  // correctness bar as before this feature existed. The rest (each
+  // guide's personal DM) are supplementary copies: if one guide has
+  // blocked the bot or never actually started a chat with it, that
+  // shouldn't fail the whole booking for everyone else.
+  const primaryRes = await sendBookingToOne(env, recipients[0], text, replyMarkup, receipt, activeElsewhere);
 
   // IMPORTANT: only report success to the visitor's browser if the
   // booking message actually reached Telegram. Previously this always
@@ -368,19 +407,35 @@ export async function handleSubmit(request, env, ctx) {
   // "successfully" submit a booking that the admin never saw, with no
   // error anywhere. Now a failed send is reported back as an error so it
   // can be surfaced in the UI instead of disappearing silently.
-  if (!res.ok) {
-    return json({ ok: false, error: res.description || "telegram send failed" }, env, 502);
+  if (!primaryRes.ok) {
+    return json({ ok: false, error: primaryRes.description || "telegram send failed" }, env, 502);
   }
 
-  // SPEED: the visitor already has everything they need (bookingId, and
-  // /api/status/:id already falls back to "pending" for an unknown id —
-  // see index.js), so the bookkeeping below doesn't need to finish
-  // before responding. Deferred via ctx.waitUntil when available.
-  async function persistBooking() {
+  const messageRefs = [];
+  if (primaryRes.result && primaryRes.result.message_id) {
+    messageRefs.push({ chatId: recipients[0], messageId: primaryRes.result.message_id });
+  }
+
+  // SPEED + reliability: the visitor already has everything they need
+  // (bookingId), so neither the guide DM fan-out nor the KV bookkeeping
+  // needs to finish before responding. Deferred via ctx.waitUntil when
+  // available.
+  async function sendToGuidesAndPersist() {
+    const guideResults = await Promise.all(
+      recipients.slice(1).map((chatId) =>
+        sendBookingToOne(env, chatId, text, replyMarkup, receipt, activeElsewhere).catch(() => null)
+      )
+    );
+    guideResults.forEach((res, i) => {
+      if (res && res.ok && res.result && res.result.message_id) {
+        messageRefs.push({ chatId: recipients[i + 1], messageId: res.result.message_id });
+      }
+    });
+
     await env.BOOKINGS.put(`status:${bookingId}`, "pending", { expirationTtl: 60 * 60 * 24 * 30 });
     await env.BOOKINGS.put(`booking:${bookingId}`, JSON.stringify({ sessionId, siteId, data }), { expirationTtl: 60 * 60 * 24 * 30 });
-    if (res.result && res.result.message_id) {
-      await env.BOOKINGS.put(`bookingmsg:${bookingId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 * 30 });
+    if (messageRefs.length) {
+      await env.BOOKINGS.put(`bookingmsg:${bookingId}`, JSON.stringify(messageRefs), { expirationTtl: 60 * 60 * 24 * 30 });
     }
     if (sessionId) {
       await env.BOOKINGS.put(`pendingbooking:${sessionId}`, bookingId, { expirationTtl: 60 * 60 * 24 * 30 });
@@ -389,9 +444,9 @@ export async function handleSubmit(request, env, ctx) {
   }
 
   if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(persistBooking());
+    ctx.waitUntil(sendToGuidesAndPersist());
   } else {
-    await persistBooking();
+    await sendToGuidesAndPersist();
   }
 
   return json({ ok: true, bookingId }, env);
@@ -420,29 +475,53 @@ export async function handleBookingCallback(cb, env) {
     // button stops "spinning" right away instead of waiting on the edit.
     tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: `Marked ${newStatus}` }).catch(() => {});
 
-    const msgId = await env.BOOKINGS.get(`bookingmsg:${bookingId}`);
-    if (msgId && cb.message) {
-      const badge = newStatus === "confirmed" ? "\u2705 CONFIRMED" : "\u274c REJECTED";
-      // A message with a photo/document attached only exposes `caption`
-      // and must be edited with editMessageCaption — editMessageText
-      // errors out on media messages. A plain text booking message (no
-      // receipt on file) uses editMessageText as before.
-      const isMedia = !!(cb.message.photo || cb.message.document);
-      if (isMedia) {
-        const originalCaption = cb.message.caption || "";
-        await tgEditMessageCaption(env, Number(msgId), `${originalCaption}\n\n<b>${badge}</b>`);
-      } else {
-        const originalText = cb.message.text || "";
-        await tg(env, "editMessageText", {
-          chat_id: env.TELEGRAM_CHAT_ID,
-          message_id: Number(msgId),
-          parse_mode: "HTML",
-          text: `${originalText}\n\n<b>${badge}</b>`,
-        });
+    const msgRefsRaw = await env.BOOKINGS.get(`bookingmsg:${bookingId}`);
+    let msgRefs = [];
+    if (msgRefsRaw) {
+      try {
+        const parsed = JSON.parse(msgRefsRaw);
+        // Back-compat: bookings created before guide fan-out existed
+        // stored a single numeric message_id string (always in the
+        // main group), not an array of {chatId, messageId}.
+        msgRefs = Array.isArray(parsed) ? parsed : [{ chatId: env.TELEGRAM_CHAT_ID, messageId: parsed }];
+      } catch (e) {
+        msgRefs = [{ chatId: env.TELEGRAM_CHAT_ID, messageId: Number(msgRefsRaw) }];
       }
-      // Buttons no longer make sense once decided — clear them so the
-      // guide can't double-tap Confirm/Reject on an already-settled booking.
-      await tg(env, "editMessageReplyMarkup", { chat_id: env.TELEGRAM_CHAT_ID, message_id: Number(msgId), reply_markup: { inline_keyboard: [] } }).catch(() => {});
+    }
+
+    // Every recipient's copy (the main group AND every guide's personal
+    // DM — see recipientChatIds/sendBookingToOne above) gets the same
+    // "✅ CONFIRMED"/"❌ REJECTED" badge and has its buttons cleared, so
+    // whichever copy an admin acted on, every other copy reflects it too
+    // — nobody can double-act on an already-settled booking from a
+    // different chat.
+    if (msgRefs.length && cb.message) {
+      const badge = newStatus === "confirmed" ? "\u2705 CONFIRMED" : "\u274c REJECTED";
+      const isMedia = !!(cb.message.photo || cb.message.document);
+      const originalCaption = cb.message.caption || "";
+      const originalText = cb.message.text || "";
+
+      await Promise.all(
+        msgRefs.map(async (ref) => {
+          try {
+            if (isMedia) {
+              await tgEditMessageCaption(env, ref.chatId, Number(ref.messageId), `${originalCaption}\n\n<b>${badge}</b>`);
+            } else {
+              await tg(env, "editMessageText", {
+                chat_id: ref.chatId,
+                message_id: Number(ref.messageId),
+                parse_mode: "HTML",
+                text: `${originalText}\n\n<b>${badge}</b>`,
+              });
+            }
+            await tg(env, "editMessageReplyMarkup", { chat_id: ref.chatId, message_id: Number(ref.messageId), reply_markup: { inline_keyboard: [] } }).catch(() => {});
+          } catch (e) {
+            // One recipient's copy failing to edit (they deleted their
+            // chat with the bot, blocked it, etc.) shouldn't stop the
+            // others from updating.
+          }
+        })
+      );
     }
 
     // A rejected booking frees up that visitor's "one pending booking"
@@ -477,7 +556,7 @@ export async function handleBookingCallback(cb, env) {
     }
     if (cb.message) {
       await tg(env, "sendMessage", {
-        chat_id: env.TELEGRAM_CHAT_ID,
+        chat_id: cb.message.chat.id,
         parse_mode: "HTML",
         text: `\ud83d\udeab This chat id is now blocked from booking — future submissions from them will be recorded but won't be sent here.\n<i>ref: ${escapeHtml(bookingId)}</i>`,
         reply_to_message_id: cb.message.message_id,

@@ -156,3 +156,34 @@ export async function handleMedia(url, env) {
   headers.set("Access-Control-Allow-Origin", corsHeaders(env)["Access-Control-Allow-Origin"]);
   return new Response(upstream.body, { status: 200, headers });
 }
+
+// GET /media-video/<site>/<key> — same trick as /media above, but for
+// admin-uploaded background videos (see telegram-bot.js's video upload
+// flow, which writes into `videos:${site}` and points
+// background.global.videoUrl at this route). key: "global" for the
+// site-wide video, or a page/section key for a specific override.
+export async function handleVideoMedia(request, url, env) {
+  const parts = url.pathname.split("/").filter(Boolean); // ["media-video", site, key]
+  const [, site, key] = parts;
+  if (!isValidSite(site) || !key) return new Response("not found", { status: 404 });
+
+  const doc = await getDoc(env, `videos:${site}`, {});
+  const fileId = doc[key];
+  if (!fileId || typeof fileId !== "string") return new Response("not found", { status: 404 });
+
+  const fileUrl = await tgResolveFileUrl(env, fileId);
+  if (!fileUrl) return new Response("not found", { status: 404 });
+
+  // Forward the browser's Range header (video players — especially
+  // Safari/iOS — always send one, even on first load) so Telegram's CDN
+  // can respond with 206 Partial Content instead of sending the whole
+  // file on every request.
+  const range = request && request.headers.get("range");
+  const upstream = await fetch(fileUrl, range ? { headers: { Range: range } } : undefined);
+  if (!upstream.ok && upstream.status !== 206) return new Response("not found", { status: 404 });
+
+  const headers = new Headers(upstream.headers);
+  headers.set("Cache-Control", "public, max-age=3600");
+  headers.set("Access-Control-Allow-Origin", corsHeaders(env)["Access-Control-Allow-Origin"]);
+  return new Response(upstream.body, { status: upstream.status, headers });
+}

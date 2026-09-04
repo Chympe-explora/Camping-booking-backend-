@@ -74,7 +74,7 @@
  */
 
 import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback, handleRefundRequest, handleRefundStatus } from "./booking.js";
-import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleAdminResetImages } from "./content-api.js";
+import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleVideoMedia, handleAdminResetImages } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
 import { handleEraMessage, handleEraPoll, handleEraTyping } from "./era-ai.js";
 import { handleGetRatings, handleSubmitRating } from "./ratings.js";
@@ -117,6 +117,7 @@ export default {
       if (url.pathname === "/api/calculate-price" && request.method === "POST") return handleCalculatePrice(request, env);
       if (url.pathname === "/api/admin/reset-images" && request.method === "POST") return handleAdminResetImages(request, env);
       if (url.pathname.startsWith("/media/") && request.method === "GET") return handleMedia(url, env);
+      if (url.pathname.startsWith("/media-video/") && request.method === "GET") return handleVideoMedia(request, url, env);
 
       // ---- ERA AI chat assistant (new) ----
       if (url.pathname === "/api/era/message" && request.method === "POST") return handleEraMessage(request, env, ctx);
@@ -146,19 +147,41 @@ async function handleTelegramWebhook(request, env, ctx) {
   }
 
   const update = await request.json();
-  const chatId = update.callback_query?.message?.chat?.id ?? update.message?.chat?.id;
-  const adminChatId = env.TELEGRAM_ADMIN_CHAT_ID ? String(env.TELEGRAM_ADMIN_CHAT_ID) : null;
+  const cb = update.callback_query;
 
-  // Route by which chat this happened in. If no admin chat is configured
-  // yet, everything is treated as admin (fine for a single-chat setup —
-  // see DEPLOY.md for splitting them once you're ready).
-  const isAdminChat = !adminChatId || String(chatId) === adminChatId;
-
-  if (isAdminChat) {
-    await handleTelegramAdminUpdate(env, update);
-  } else if (update.callback_query) {
-    await handleBookingCallback(update.callback_query, env);
+  // Booking-decision taps (Confirm/Reject/Block/Refund) always go
+  // straight to the booking handler, no matter which chat they came
+  // from — the main group, the admin chat, or a guide's own personal
+  // DM (guides now get their own copy of every booking message, see
+  // recipientChatIds in booking.js).
+  if (cb && /^(confirm|cancel|blockvisitor|refundok|refundno):/.test(cb.data || "")) {
+    await handleBookingCallback(cb, env);
+    return new Response("ok");
   }
 
+  // The shared booking group can have many members in it — only
+  // booking Confirm/Reject/etc. taps (handled above) are meaningful
+  // there. Skip the admin-bot flow for anything else that happens in
+  // that specific chat, so ordinary chatter in the group doesn't get a
+  // "you're not an admin" refusal fired back at it. Every other chat
+  // (the admin chat, or any individual's own DM with the bot — new
+  // guide or not) still goes through normally.
+  const chatId = update.message?.chat?.id ?? cb?.message?.chat?.id;
+  if (env.TELEGRAM_CHAT_ID && String(chatId) === String(env.TELEGRAM_CHAT_ID)) {
+    return new Response("ok");
+  }
+
+  // Everything else — menu commands, text replies, admin-bot callback
+  // buttons, and a brand-new guide's very first message pasting their
+  // access code — goes to the admin bot handler, regardless of which
+  // chat it came from. handleTelegramAdminUpdate does its own
+  // isAdmin/isGuide check before acting on anything: a stranger's
+  // message either redeems a valid code or gets refused, an admin/
+  // guide's message gets the normal menu behavior. Routing everything
+  // here unconditionally is what makes a new guide's first-ever
+  // message even reach the code-redemption check in the first place —
+  // a stricter "known chat only" filter here would silently drop it
+  // before that check ever runs.
+  await handleTelegramAdminUpdate(env, update);
   return new Response("ok");
 }
