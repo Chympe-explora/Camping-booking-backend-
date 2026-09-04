@@ -30,6 +30,7 @@
  */
 
 import { bumpVisitors, bumpBookings } from "./stats.js";
+import { isSessionActive, isSessionBlocked, toggleSessionBlocked } from "./conversations.js";
 
 export function corsHeaders(env) {
   return {
@@ -74,22 +75,24 @@ async function tgSendPhotoOrDoc(env, formFields, file) {
 // re-upload needed. Used to attach the receipt the visitor already sent
 // to the final booking message. photo captions are capped at 1024 chars
 // by Telegram, so callers must check length before relying on this.
-async function tgSendPhotoByIdWithButtons(env, fileId, caption, replyMarkup) {
+async function tgSendPhotoByIdWithButtons(env, fileId, caption, replyMarkup, silent) {
   return tg(env, "sendPhoto", {
     chat_id: env.TELEGRAM_CHAT_ID,
     photo: fileId,
     caption,
     parse_mode: "HTML",
     reply_markup: replyMarkup,
+    disable_notification: !!silent,
   });
 }
-async function tgSendDocumentByIdWithButtons(env, fileId, caption, replyMarkup) {
+async function tgSendDocumentByIdWithButtons(env, fileId, caption, replyMarkup, silent) {
   return tg(env, "sendDocument", {
     chat_id: env.TELEGRAM_CHAT_ID,
     document: fileId,
     caption,
     parse_mode: "HTML",
     reply_markup: replyMarkup,
+    disable_notification: !!silent,
   });
 }
 async function tgEditMessageCaption(env, messageId, caption) {
@@ -159,37 +162,46 @@ export async function handleTap(request, env) {
 // Drafts are edited in place (one Telegram message per session) instead of
 // posting a new message every time the visitor types — the message id is
 // cached in KV against the sessionId.
-export async function handleDraft(request, env) {
+//
+// SPEED: the actual Telegram network calls (typing bubble + send/edit)
+// are pushed into ctx.waitUntil() and the visitor's browser gets an
+// immediate { ok: true } — a live draft preview is a nice-to-have for
+// the admin, not something the visitor should ever wait on. If ctx
+// isn't available for some reason (older caller), falls back to the
+// previous fully-awaited behavior so nothing breaks.
+export async function handleDraft(request, env, ctx) {
   const { sessionId, siteId, data } = await request.json();
   if (!sessionId) return json({ ok: false }, env, 400);
-
-  // Fire the native "typing…" bubble every time a draft update comes in —
-  // this is what happens while the visitor is actively filling the form
-  // (and immediately again the moment they tap Next/Back to a new step),
-  // giving the admin the same live, WhatsApp-style typing signal as chat.
-  await tgTyping(env);
 
   const text = `\u270f\ufe0f <b>Draft — ${escapeHtml(siteId || "site")}</b>\n${fmtData(data)}`;
   const existingMsgId = await env.BOOKINGS.get(`draftmsg:${sessionId}`);
 
-  let res;
-  if (existingMsgId) {
-    res = await tg(env, "editMessageText", {
-      chat_id: env.TELEGRAM_CHAT_ID,
-      message_id: Number(existingMsgId),
-      parse_mode: "HTML",
-      text,
-    });
-    if (!res.ok) {
-      // original message may have been deleted / too old to edit — send a fresh one
+  async function sendDraft() {
+    await tgTyping(env);
+    let res;
+    if (existingMsgId) {
+      res = await tg(env, "editMessageText", {
+        chat_id: env.TELEGRAM_CHAT_ID,
+        message_id: Number(existingMsgId),
+        parse_mode: "HTML",
+        text,
+      });
+      if (!res.ok) {
+        // original message may have been deleted / too old to edit — send a fresh one
+        res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text });
+      }
+    } else {
       res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text });
     }
-  } else {
-    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text });
+    if (res.ok && res.result && res.result.message_id) {
+      await env.BOOKINGS.put(`draftmsg:${sessionId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 });
+    }
   }
 
-  if (res.ok && res.result && res.result.message_id) {
-    await env.BOOKINGS.put(`draftmsg:${sessionId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 });
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(sendDraft().catch(() => {}));
+  } else {
+    await sendDraft().catch(() => {});
   }
   return json({ ok: true }, env);
 }
@@ -198,13 +210,22 @@ export async function handleDraft(request, env) {
 // submitted anything). Sends a brand-new, distinct Telegram message with
 // every detail collected so far, so the admin sees it immediately —
 // separate from the live-editing draft message so neither gets overwritten.
-export async function handlePayNow(request, env) {
+//
+// SPEED: this is an FYI ping, same as /api/visit and /api/tap — the
+// visitor doesn't need to wait for Telegram to accept it, so it's fired
+// via ctx.waitUntil and the browser gets an instant response.
+export async function handlePayNow(request, env, ctx) {
   const { sessionId, siteId, data } = await request.json();
   const text =
     `\ud83d\udcb3 <b>Pay Now tapped — ${escapeHtml(siteId || "site")}</b>\n${fmtData(data)}\n\n` +
     `<i>session: ${escapeHtml(sessionId || "")}</i>`;
-  const res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text });
-  return json({ ok: !!res.ok, error: res.ok ? undefined : (res.description || "telegram send failed") }, env, res.ok ? 200 : 502);
+  const send = tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text });
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(send.catch(() => {}));
+  } else {
+    await send.catch(() => {});
+  }
+  return json({ ok: true }, env);
 }
 
 export async function handleReceipt(request, env) {
@@ -243,8 +264,41 @@ export async function handleReceipt(request, env) {
 // status) and its own Telegram message with inline Confirm/Reject buttons.
 // The bookingId <-> Telegram message id mapping and the full booking data
 // are both cached in KV; Telegram remains the durable, readable log.
-export async function handleSubmit(request, env) {
+export async function handleSubmit(request, env, ctx) {
   const { sessionId, siteId, data } = await request.json();
+
+  // A blocked chat id (see conversations.js / the "🚫 Block This Chat ID
+  // From Booking" button) still gets a bookingId and their booking is
+  // still recorded in KV — nothing errors out or looks broken on their
+  // end — it just never reaches Telegram, so a blocked/spam visitor
+  // can't put anything in front of the admin anymore.
+  const blocked = sessionId ? await isSessionBlocked(env, sessionId) : false;
+  if (blocked) {
+    const bookingId = newId();
+    await env.BOOKINGS.put(`status:${bookingId}`, "pending", { expirationTtl: 60 * 60 * 24 * 30 });
+    await env.BOOKINGS.put(`booking:${bookingId}`, JSON.stringify({ sessionId, siteId, data, blocked: true }), { expirationTtl: 60 * 60 * 24 * 30 });
+    return json({ ok: true, bookingId }, env);
+  }
+
+  // One pending booking per visitor at a time — stops an accidental
+  // double-submit (double-tap, browser back-then-resubmit) from
+  // creating a second Confirm/Reject message for the same trip. If
+  // their previous booking has already been decided (confirmed/
+  // cancelled), a new one is allowed as normal.
+  if (sessionId) {
+    const existingId = await env.BOOKINGS.get(`pendingbooking:${sessionId}`);
+    if (existingId) {
+      const existingStatus = await env.BOOKINGS.get(`status:${existingId}`);
+      if (existingStatus === "pending") {
+        return json(
+          { ok: false, error: "You already have a booking awaiting confirmation. Please wait for that one to be confirmed or rejected first.", bookingId: existingId, alreadyPending: true },
+          env,
+          409
+        );
+      }
+    }
+  }
+
   const bookingId = newId();
 
   // Prefer the fully pretty-formatted text the site already builds for
@@ -258,11 +312,26 @@ export async function handleSubmit(request, env) {
   const text = `${bodyText}\n\n<i>ref: ${bookingId}</i>`;
 
   const replyMarkup = {
-    inline_keyboard: [[
-      { text: "\u2705 Confirm", callback_data: `confirm:${bookingId}` },
-      { text: "\u274c Reject", callback_data: `cancel:${bookingId}` },
-    ]],
+    inline_keyboard: [
+      [
+        { text: "\u2705 Confirm", callback_data: `confirm:${bookingId}` },
+        { text: "\u274c Reject", callback_data: `cancel:${bookingId}` },
+      ],
+      // Lets the admin remove this specific visitor's chat id from ever
+      // sending a booking notification here again, right from the
+      // booking itself — no need to dig up their conversation thread
+      // first. See handleBookingCallback's "blockvisitor" case below.
+      [{ text: "\ud83d\udeab Block This Chat ID From Booking", callback_data: `blockvisitor:${bookingId}` }],
+    ],
   };
+
+  // If this visitor is currently marked 🟢 Active from Telegram (see
+  // conversations.js), an admin already has eyes on them directly, so
+  // this booking message is sent silently (no notification sound/badge)
+  // instead of being skipped outright — it still lands in the group
+  // with working Confirm/Reject buttons, it just doesn't interrupt
+  // anyone. When not active, this behaves exactly as it always has.
+  const activeElsewhere = sessionId ? await isSessionActive(env, sessionId) : false;
 
   // If this visitor already uploaded a payment receipt (during the Pay
   // Now step), re-attach that SAME Telegram file (no re-upload) to this
@@ -278,18 +347,18 @@ export async function handleSubmit(request, env) {
   let res;
   if (receipt && text.length <= 1024) {
     res = receipt.isImage
-      ? await tgSendPhotoByIdWithButtons(env, receipt.fileId, text, replyMarkup)
-      : await tgSendDocumentByIdWithButtons(env, receipt.fileId, text, replyMarkup);
+      ? await tgSendPhotoByIdWithButtons(env, receipt.fileId, text, replyMarkup, activeElsewhere)
+      : await tgSendDocumentByIdWithButtons(env, receipt.fileId, text, replyMarkup, activeElsewhere);
   } else if (receipt) {
     // Receipt shown first (short caption), full details + buttons follow.
     const shortCaption = `\ud83e\uddfe <b>Payment Receipt</b> — ref ${bookingId}`;
     (receipt.isImage
-      ? tgSendPhotoByIdWithButtons(env, receipt.fileId, shortCaption, undefined)
-      : tgSendDocumentByIdWithButtons(env, receipt.fileId, shortCaption, undefined)
+      ? tgSendPhotoByIdWithButtons(env, receipt.fileId, shortCaption, undefined, activeElsewhere)
+      : tgSendDocumentByIdWithButtons(env, receipt.fileId, shortCaption, undefined, activeElsewhere)
     ).catch(() => {});
-    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup });
+    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: activeElsewhere });
   } else {
-    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup });
+    res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: activeElsewhere });
   }
 
   // IMPORTANT: only report success to the visitor's browser if the
@@ -303,12 +372,27 @@ export async function handleSubmit(request, env) {
     return json({ ok: false, error: res.description || "telegram send failed" }, env, 502);
   }
 
-  await env.BOOKINGS.put(`status:${bookingId}`, "pending", { expirationTtl: 60 * 60 * 24 * 30 });
-  await env.BOOKINGS.put(`booking:${bookingId}`, JSON.stringify({ sessionId, siteId, data }), { expirationTtl: 60 * 60 * 24 * 30 });
-  if (res.result && res.result.message_id) {
-    await env.BOOKINGS.put(`bookingmsg:${bookingId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 * 30 });
+  // SPEED: the visitor already has everything they need (bookingId, and
+  // /api/status/:id already falls back to "pending" for an unknown id —
+  // see index.js), so the bookkeeping below doesn't need to finish
+  // before responding. Deferred via ctx.waitUntil when available.
+  async function persistBooking() {
+    await env.BOOKINGS.put(`status:${bookingId}`, "pending", { expirationTtl: 60 * 60 * 24 * 30 });
+    await env.BOOKINGS.put(`booking:${bookingId}`, JSON.stringify({ sessionId, siteId, data }), { expirationTtl: 60 * 60 * 24 * 30 });
+    if (res.result && res.result.message_id) {
+      await env.BOOKINGS.put(`bookingmsg:${bookingId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 * 30 });
+    }
+    if (sessionId) {
+      await env.BOOKINGS.put(`pendingbooking:${sessionId}`, bookingId, { expirationTtl: 60 * 60 * 24 * 30 });
+      await env.BOOKINGS.delete(`receiptfile:${sessionId}`).catch(() => {});
+    }
   }
-  if (sessionId) await env.BOOKINGS.delete(`receiptfile:${sessionId}`).catch(() => {});
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(persistBooking());
+  } else {
+    await persistBooking();
+  }
 
   return json({ ok: true, bookingId }, env);
 }
@@ -360,5 +444,143 @@ export async function handleBookingCallback(cb, env) {
       // guide can't double-tap Confirm/Reject on an already-settled booking.
       await tg(env, "editMessageReplyMarkup", { chat_id: env.TELEGRAM_CHAT_ID, message_id: Number(msgId), reply_markup: { inline_keyboard: [] } }).catch(() => {});
     }
+
+    // A rejected booking frees up that visitor's "one pending booking"
+    // slot immediately, instead of waiting out the 30-day TTL — they can
+    // submit a new one right away. A confirmed booking stays as their
+    // on-file reference (used to look up which booking a refund request
+    // is for, see handleRefundRequest below).
+    if (newStatus === "cancelled") {
+      const bookingRaw = await env.BOOKINGS.get(`booking:${bookingId}`);
+      const booking = bookingRaw ? JSON.parse(bookingRaw) : null;
+      if (booking && booking.sessionId) {
+        const pending = await env.BOOKINGS.get(`pendingbooking:${booking.sessionId}`);
+        if (pending === bookingId) await env.BOOKINGS.delete(`pendingbooking:${booking.sessionId}`).catch(() => {});
+      }
+    }
+  }
+
+  // ---- block this booking's chat id from ever notifying here again ----
+  if (action === "blockvisitor" && bookingId) {
+    const bookingRaw = await env.BOOKINGS.get(`booking:${bookingId}`);
+    const booking = bookingRaw ? JSON.parse(bookingRaw) : null;
+    if (!booking || !booking.sessionId) {
+      tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Couldn't find who sent this booking.", show_alert: true }).catch(() => {});
+      return;
+    }
+    const alreadyBlocked = await isSessionBlocked(env, booking.sessionId);
+    if (alreadyBlocked) {
+      tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Already blocked." }).catch(() => {});
+    } else {
+      await toggleSessionBlocked(env, booking.sessionId); // false -> true
+      tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Blocked — their future bookings won't notify here.", show_alert: true }).catch(() => {});
+    }
+    if (cb.message) {
+      await tg(env, "sendMessage", {
+        chat_id: env.TELEGRAM_CHAT_ID,
+        parse_mode: "HTML",
+        text: `\ud83d\udeab This chat id is now blocked from booking — future submissions from them will be recorded but won't be sent here.\n<i>ref: ${escapeHtml(bookingId)}</i>`,
+        reply_to_message_id: cb.message.message_id,
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  // ---- refund decision (Approve/Deny under a refund request message) ----
+  if ((action === "refundok" || action === "refundno") && bookingId) {
+    return handleRefundDecision(cb, env, bookingId, action === "refundok");
+  }
+}
+
+// ---------------------------------------------------------------------
+// REFUNDS — a visitor with a CONFIRMED booking can request a refund
+// (from the site's refund-policy page). This sends a new Telegram
+// message with Approve/Deny buttons, separate from the original
+// booking message (which may already be long-settled), and the
+// visitor's browser polls /api/refund-status/:bookingId the same way
+// it already polls /api/status/:id for the original confirm/reject.
+// ---------------------------------------------------------------------
+
+// POST /api/refund-request  { sessionId, siteId, bookingId, reason }
+export async function handleRefundRequest(request, env, ctx) {
+  const { sessionId, siteId, bookingId, reason } = await request.json();
+  if (!bookingId) return json({ ok: false, error: "bookingId is required" }, env, 400);
+
+  const status = await env.BOOKINGS.get(`status:${bookingId}`);
+  if (status !== "confirmed") {
+    return json({ ok: false, error: "Only a confirmed booking can request a refund." }, env, 400);
+  }
+
+  // Same one-at-a-time guard as bookings — no point letting someone
+  // spam five refund requests for the same booking.
+  const existingRefundStatus = await env.BOOKINGS.get(`refundstatus:${bookingId}`);
+  if (existingRefundStatus === "requested") {
+    return json({ ok: true, bookingId, refundStatus: "requested", alreadyRequested: true }, env);
+  }
+
+  const bookingRaw = await env.BOOKINGS.get(`booking:${bookingId}`);
+  const booking = bookingRaw ? JSON.parse(bookingRaw) : null;
+
+  const text =
+    `\ud83d\udcb8 <b>Refund requested — ${escapeHtml(siteId || (booking && booking.siteId) || "site")}</b>\n` +
+    `<b>Booking ref:</b> ${escapeHtml(bookingId)}\n` +
+    (reason ? `<b>Reason:</b> ${escapeHtml(String(reason).slice(0, 500))}\n` : "") +
+    (booking && booking.data ? `\n${fmtData(booking.data)}` : "");
+
+  const replyMarkup = {
+    inline_keyboard: [[
+      { text: "\u2705 Approve Refund", callback_data: `refundok:${bookingId}` },
+      { text: "\u274c Deny Refund", callback_data: `refundno:${bookingId}` },
+    ]],
+  };
+
+  async function send() {
+    const activeElsewhere = sessionId ? await isSessionActive(env, sessionId) : false;
+    const res = await tg(env, "sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: activeElsewhere });
+    if (res.ok && res.result && res.result.message_id) {
+      await env.BOOKINGS.put(`refundmsg:${bookingId}`, String(res.result.message_id), { expirationTtl: 60 * 60 * 24 * 30 });
+    }
+    return res;
+  }
+
+  // The visitor needs to know the request actually reached the admin
+  // (same correctness bar as the original booking submit), so this one
+  // stays awaited rather than deferred.
+  const res = await send();
+  if (!res.ok) {
+    return json({ ok: false, error: res.description || "telegram send failed" }, env, 502);
+  }
+
+  await env.BOOKINGS.put(`refundstatus:${bookingId}`, "requested", { expirationTtl: 60 * 60 * 24 * 30 });
+  return json({ ok: true, bookingId, refundStatus: "requested" }, env);
+}
+
+// GET /api/refund-status/:bookingId
+export async function handleRefundStatus(bookingId, env) {
+  const status = (await env.BOOKINGS.get(`refundstatus:${bookingId}`)) || "none";
+  return json({ bookingId, refundStatus: status }, env);
+}
+
+async function handleRefundDecision(cb, env, bookingId, approved) {
+  const newStatus = approved ? "approved" : "denied";
+
+  // Same ordering as booking confirm/reject: KV first, so the visitor's
+  // poll picks it up instantly regardless of how long the Telegram
+  // message edit below takes.
+  await env.BOOKINGS.put(`refundstatus:${bookingId}`, newStatus, { expirationTtl: 60 * 60 * 24 * 30 });
+
+  tg(env, "answerCallbackQuery", { callback_query_id: cb.id, text: `Refund ${newStatus}` }).catch(() => {});
+
+  const msgId = await env.BOOKINGS.get(`refundmsg:${bookingId}`);
+  if (msgId && cb.message) {
+    const badge = approved ? "\u2705 REFUND APPROVED" : "\u274c REFUND DENIED";
+    const originalText = cb.message.text || "";
+    await tg(env, "editMessageText", {
+      chat_id: env.TELEGRAM_CHAT_ID,
+      message_id: Number(msgId),
+      parse_mode: "HTML",
+      text: `${originalText}\n\n<b>${badge}</b>`,
+    }).catch(() => {});
+    await tg(env, "editMessageReplyMarkup", { chat_id: env.TELEGRAM_CHAT_ID, message_id: Number(msgId), reply_markup: { inline_keyboard: [] } }).catch(() => {});
   }
 }

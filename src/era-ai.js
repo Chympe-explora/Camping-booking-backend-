@@ -699,7 +699,7 @@ async function computeAiReply(env, site, trimmed, context) {
 //      answers from Telegram instead (§4, §5, §17 — no spamming
 //      "please wait" while a human is expected to respond)
 // ---------------------------------------------------------------------
-export async function handleEraMessage(request, env) {
+export async function handleEraMessage(request, env, ctx) {
   const body = await request.json().catch(() => ({}));
   const { site, sessionId: rawSessionId, message } = body || {};
 
@@ -744,7 +744,17 @@ export async function handleEraMessage(request, env) {
   conversation.lastQuestion = trimmed;
   await saveConversation(env, conversation);
 
-  await forwardToTelegram(env, conversation, trimmed, replyText, { isNew, escalated, reopened });
+  // SPEED: the visitor's reply (replyText, computed above) doesn't
+  // depend on this Telegram forward succeeding — it's purely the
+  // admin-side notification. Deferred via ctx.waitUntil so the visitor
+  // gets their answer the instant it's ready, not after an extra
+  // Telegram API round-trip.
+  const forward = forwardToTelegram(env, conversation, trimmed, replyText, { isNew, escalated, reopened }).catch(() => {});
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(forward);
+  } else {
+    await forward;
+  }
   await bumpStats(env);
 
   return json({ ok: true, reply: replyText, status: conversation.status, convId: conversation.id }, env);
@@ -758,10 +768,15 @@ export async function handleEraMessage(request, env) {
 // bubble in the admin chat, the same live signal WhatsApp shows. No
 // conversation state changes here; this is purely a transient UI cue.
 // ---------------------------------------------------------------------
-export async function handleEraTyping(request, env) {
+export async function handleEraTyping(request, env, ctx) {
   const body = await request.json().catch(() => ({}));
   if (!body || !body.sessionId) return json({ ok: false }, env, 400);
-  await notifyTyping(env);
+  const notify = notifyTyping(env).catch(() => {});
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(notify);
+  } else {
+    await notify;
+  }
   return json({ ok: true }, env);
 }
 

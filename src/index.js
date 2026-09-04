@@ -73,7 +73,7 @@
  *                               wrangler secret put ADMIN_API_SECRET
  */
 
-import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback } from "./booking.js";
+import { json, corsHeaders, handleVisit, handleTap, handleDraft, handlePayNow, handleReceipt, handleSubmit, handleBookingCallback, handleRefundRequest, handleRefundStatus } from "./booking.js";
 import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights, handleGetDiscounts, handleCalculatePrice, handleMedia, handleAdminResetImages } from "./content-api.js";
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
 import { handleEraMessage, handleEraPoll, handleEraTyping } from "./era-ai.js";
@@ -91,14 +91,21 @@ export default {
       // ---- booking (unchanged) ----
       if (url.pathname === "/api/visit" && request.method === "POST") return handleVisit(request, env);
       if (url.pathname === "/api/tap" && request.method === "POST") return handleTap(request, env);
-      if (url.pathname === "/api/draft" && request.method === "POST") return handleDraft(request, env);
-      if (url.pathname === "/api/paynow" && request.method === "POST") return handlePayNow(request, env);
+      if (url.pathname === "/api/draft" && request.method === "POST") return handleDraft(request, env, ctx);
+      if (url.pathname === "/api/paynow" && request.method === "POST") return handlePayNow(request, env, ctx);
       if (url.pathname === "/api/receipt" && request.method === "POST") return handleReceipt(request, env);
-      if (url.pathname === "/api/submit" && request.method === "POST") return handleSubmit(request, env);
+      if (url.pathname === "/api/submit" && request.method === "POST") return handleSubmit(request, env, ctx);
       if (url.pathname.startsWith("/api/status/") && request.method === "GET") {
         const id = url.pathname.split("/").pop();
         const status = (await env.BOOKINGS.get(`status:${id}`)) || "pending";
         return json({ status }, env);
+      }
+
+      // ---- refunds (new) — see booking.js ----
+      if (url.pathname === "/api/refund-request" && request.method === "POST") return handleRefundRequest(request, env, ctx);
+      if (url.pathname.startsWith("/api/refund-status/") && request.method === "GET") {
+        const id = url.pathname.split("/").pop();
+        return handleRefundStatus(id, env);
       }
 
       // ---- content / pricing (new) ----
@@ -112,9 +119,9 @@ export default {
       if (url.pathname.startsWith("/media/") && request.method === "GET") return handleMedia(url, env);
 
       // ---- ERA AI chat assistant (new) ----
-      if (url.pathname === "/api/era/message" && request.method === "POST") return handleEraMessage(request, env);
+      if (url.pathname === "/api/era/message" && request.method === "POST") return handleEraMessage(request, env, ctx);
       if (url.pathname === "/api/era/poll" && request.method === "GET") return handleEraPoll(url, env);
-      if (url.pathname === "/api/era/typing" && request.method === "POST") return handleEraTyping(request, env);
+      if (url.pathname === "/api/era/typing" && request.method === "POST") return handleEraTyping(request, env, ctx);
 
       // ---- visitor ratings (new) ----
       if (url.pathname === "/api/ratings" && request.method === "GET") return handleGetRatings(url, env);
@@ -132,7 +139,7 @@ export default {
   },
 };
 
-async function handleTelegramWebhook(request, env) {
+async function handleTelegramWebhook(request, env, ctx) {
   const secretHeader = request.headers.get("x-telegram-bot-api-secret-token");
   if (env.TELEGRAM_WEBHOOK_SECRET && secretHeader !== env.TELEGRAM_WEBHOOK_SECRET) {
     return new Response("forbidden", { status: 403 });

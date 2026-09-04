@@ -7,6 +7,57 @@ export const SCHEMA_DEFAULTS = {
       "logoImage": "logo.png",
       "backgroundImage": "Blue watefall.jpg",
       "instagram": "https://www.instagram.com/unexplored_meghalaya?igsh=ZHZpODB3aXl0bXBu",
+      "background": {
+        "global": {
+          "enabled": true,
+          "videoUrl": "hero-video.mp4",
+          "videoEnabled": true,
+          "videoOpacity": 100,
+          "fallbackImage": "Trek Trail Mist.jpg",
+          "overlay": { "enabled": true, "color": "#000000", "opacity": 40, "gradient": false }
+        },
+        "pages": {
+          "home": { "enabled": false },
+          "refund-policy": { "enabled": false }
+        }
+      },
+      "sectionStyles": {
+        "hero": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        },
+        "destinations": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        },
+        "experiences": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        },
+        "booking": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        },
+        "about": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        },
+        "ratings": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        },
+        "footer": {
+          "background": { "type": "transparent", "opacity": 100 },
+          "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+        }
+      },
       "nav": {
         "items": [
           {
@@ -46,7 +97,12 @@ export const SCHEMA_DEFAULTS = {
         "enabled": true,
         "discoverLabel": "Discover",
         "discoverTargetId": "destinations",
+        "bookNowLabel": "Explore",
         "bookNowTargetId": "destinations"
+      },
+      "headerCta": {
+        "label": "Book Now",
+        "target": "booking"
       },
       "notice": {
         "enabled": false,
@@ -1176,7 +1232,35 @@ export const SCHEMA_DEFAULTS = {
         "videoEnabled": true,
         "fallbackImage": "Blue watefall.jpg",
         "enabled": true,
-        "discoverLabel": "Discover"
+        "discoverLabel": "Discover",
+        "bookNowLabel": "Explore",
+        "bookNowTargetPage": 2
+      },
+      "headerCta": {
+        "targetPage": 2
+      },
+      "background": {
+        "global": {
+          "enabled": true,
+          "videoUrl": "hero-video.mp4",
+          "videoEnabled": true,
+          "videoOpacity": 100,
+          "fallbackImage": "Trek Trail Mist.jpg",
+          "overlay": { "enabled": true, "color": "#000000", "opacity": 40, "gradient": false }
+        },
+        "pages": {
+          "1": { "enabled": false }, "2": { "enabled": false }, "3": { "enabled": false },
+          "4": { "enabled": false }, "5": { "enabled": false }, "6": { "enabled": false }, "7": { "enabled": false }
+        }
+      },
+      "sectionStyles": {
+        "1": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "2": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "3": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "4": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "5": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "6": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "7": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } }
       },
       "notice": {
         "enabled": false,
@@ -2108,7 +2192,34 @@ export const SCHEMA_DEFAULTS = {
         "videoEnabled": true,
         "fallbackImage": "hero-river-aerial.jpg",
         "enabled": true,
-        "discoverLabel": "Discover"
+        "discoverLabel": "Discover",
+        "bookNowLabel": "Explore"
+      },
+      "headerCta": {
+        "targetPage": 2
+      },
+      "background": {
+        "global": {
+          "enabled": true,
+          "videoUrl": "hero-video.mp4",
+          "videoEnabled": true,
+          "videoOpacity": 100,
+          "fallbackImage": "hero-river-aerial.jpg",
+          "overlay": { "enabled": true, "color": "#000000", "opacity": 40, "gradient": false }
+        },
+        "pages": {
+          "1": { "enabled": false }, "2": { "enabled": false }, "3": { "enabled": false },
+          "4": { "enabled": false }, "5": { "enabled": false }, "6": { "enabled": false }, "7": { "enabled": false }
+        }
+      },
+      "sectionStyles": {
+        "1": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "2": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "3": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "4": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "5": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "6": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
+        "7": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } }
       },
       "notice": {
         "enabled": false,

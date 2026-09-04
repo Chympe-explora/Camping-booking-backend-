@@ -92,6 +92,15 @@ export async function getOrCreateConversation(env, sessionId, site) {
     // auto-responder for that visitor, but that's now opt-in per
     // conversation, not the default. "ai" | "human" | "paused" | "closed"
     status: "human",
+    // "active" is separate from the above chat-mode status — it just
+    // means "an admin is personally, actively handling this visitor
+    // right now" (toggled from Telegram, per visitor). While a visitor
+    // is marked active, booking.js skips the group-chat booking
+    // confirm/reject ping for THEIR bookings specifically, since the
+    // admin already has eyes on them directly and a second group
+    // notification would just be noise. Defaults to false — the
+    // group behaves exactly as it always has until an admin flips this.
+    active: false,
     needsHuman: false,
     createdAt: Date.now(),
     lastActivity: Date.now(),
@@ -115,6 +124,47 @@ export async function setConversationStatus(env, sessionId, status) {
   if (status !== "ai") conv.needsHuman = false; // a human is on it now, one way or another
   await saveConversation(env, conv);
   return conv;
+}
+
+// Flips the "an admin is actively, personally handling this visitor"
+// flag — independent of the ai/human/paused/closed chat-mode status
+// above. See getOrCreateConversation() for what this controls.
+export async function toggleConversationActive(env, sessionId) {
+  const conv = await getConversation(env, sessionId);
+  if (!conv) return null;
+  conv.active = !conv.active;
+  await saveConversation(env, conv);
+  return conv;
+}
+
+// Used by booking.js to decide whether a booking confirm/reject ping
+// should go to the group chat. Defensive against conversations that
+// don't exist yet or predate this field (both just mean "not active").
+export async function isSessionActive(env, sessionId) {
+  if (!sessionId) return false;
+  const conv = await getConversation(env, sessionId);
+  return !!(conv && conv.active);
+}
+
+// Flips "remove this chat id from receiving booking [notifications]" —
+// stored independently of the conversation record (a dedicated KV key,
+// not a field on conv) because a visitor can submit a booking without
+// ever having chatted first, so there may be no conversation to attach
+// this to. Works for every visitor either way.
+export async function isSessionBlocked(env, sessionId) {
+  if (!sessionId) return false;
+  return (await env.BOOKINGS.get(`blocked:${sessionId}`)) === "1";
+}
+export async function setSessionBlocked(env, sessionId, blocked) {
+  if (!sessionId) return false;
+  if (blocked) await env.BOOKINGS.put(`blocked:${sessionId}`, "1", { expirationTtl: 60 * 60 * 24 * 365 });
+  else await env.BOOKINGS.delete(`blocked:${sessionId}`);
+  return blocked;
+}
+export async function toggleSessionBlocked(env, sessionId) {
+  const now = await isSessionBlocked(env, sessionId);
+  await setSessionBlocked(env, sessionId, !now);
+  return !now;
 }
 
 export function statusLabel(status) {
@@ -167,10 +217,12 @@ export async function notifyTyping(env) {
   await tgSendChatAction(env, chatId, "typing").catch(() => {});
 }
 
-function convButtons(sessionId) {
+function convButtons(sessionId, active, blocked) {
   return kb([
     [btn("↩️ Reply", `convreply:${sessionId}`)],
     [btn("🤖 AI", `convai:${sessionId}`), btn("👤 Take Over", `convtakeover:${sessionId}`), btn("⏸ Pause", `convpause:${sessionId}`), btn("🔴 Close", `convclose:${sessionId}`)],
+    [btn(active ? "🟢 Active (tap to turn off)" : "⚪ Not Active (tap to turn on)", `convactive:${sessionId}`)],
+    [btn(blocked ? "✅ Unblock Bookings" : "🚫 Block Bookings", `convblock:${sessionId}`)],
   ]);
 }
 
@@ -180,8 +232,9 @@ export async function forwardToTelegram(env, conv, visitorMessage, aiReply, meta
   if (!chatId) return;
 
   const flag = meta.escalated ? "⚠️ " : meta.isNew ? "🔔 " : "";
+  const blocked = await isSessionBlocked(env, conv.sessionId);
   const lines = [
-    `${flag}<b>Visitor #${conv.id}</b> — ${statusLabel(conv.status)}${conv.site ? ` · <i>${escapeHtml(conv.site)}</i>` : ""}`,
+    `${flag}<b>Visitor #${conv.id}</b> — ${statusLabel(conv.status)}${conv.active ? " · 🟢 ACTIVE" : ""}${blocked ? " · 🚫 BLOCKED" : ""}${conv.site ? ` · <i>${escapeHtml(conv.site)}</i>` : ""}`,
   ];
   if (meta.reopened) lines.push(`<i>(conversation was closed — reopened by a new message)</i>`);
   lines.push(``, `💬 <b>Visitor:</b>\n${escapeHtml(visitorMessage)}`);
@@ -194,7 +247,7 @@ export async function forwardToTelegram(env, conv, visitorMessage, aiReply, meta
     lines.push(``, `⚠️ <i>ERA AI wasn't confident enough to answer this one — a human reply is needed.</i>`);
   }
 
-  const sent = await tgSendMessage(env, chatId, lines.join("\n"), { reply_markup: convButtons(conv.sessionId) });
+  const sent = await tgSendMessage(env, chatId, lines.join("\n"), { reply_markup: convButtons(conv.sessionId, conv.active, blocked) });
   if (sent && sent.ok) {
     await mapTelegramMessage(env, sent.result.message_id, conv.sessionId);
   }

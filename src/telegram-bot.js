@@ -15,10 +15,10 @@ import { SCHEMA_DEFAULTS } from "./content-schema.js";
 import { SITES, SITE_LABELS, getDoc, saveDoc, deepMerge, getPath, setPath, deletePath, getSession, setSession, clearSession } from "./store.js";
 import { listChildren, humanize, chunk } from "./walker.js";
 import { DEFAULT_DISCOUNTS } from "./pricing.js";
-import { tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
+import { tg, tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
 import { getLiveStats, resetStats } from "./stats.js";
 import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
-import { getConversation, getConversationByShortId, setConversationStatus, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
+import { getConversation, getConversationByShortId, setConversationStatus, toggleConversationActive, toggleSessionBlocked, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
 
 const CATEGORIES = [
   { kind: "content", label: "✏️ Edit Website Text", perSite: true },
@@ -35,6 +35,127 @@ function isAdmin(env, userId) {
   return allowed.includes(String(userId));
 }
 
+// ---------------------------------------------------------------------
+// GUIDE ACCESS CODES — self-service way to add a new guide as an admin
+// without touching ADMIN_USER_IDS / the Cloudflare dashboard. One admin
+// taps "🔑 Generate Access Code", shares the 6-character code with the
+// new guide, and the new guide just sends that code as a plain message
+// to this bot. One-time use, expires after 24 hours.
+//
+// Guides added this way are stored in KV (guides:list), on top of
+// whatever's already in the static ADMIN_USER_IDS env var — isAdmin()
+// checks both. Storing them separately (rather than trying to mutate
+// ADMIN_USER_IDS, which isn't writable at runtime anyway) means adding
+// or removing a guide takes effect immediately, no redeploy needed.
+// ---------------------------------------------------------------------
+async function getGuides(env) {
+  const raw = await env.BOOKINGS.get("guides:list");
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+async function saveGuides(env, guides) {
+  await env.BOOKINGS.put("guides:list", JSON.stringify(guides));
+}
+
+async function isGuide(env, userId) {
+  const guides = await getGuides(env);
+  return guides.some((g) => String(g.userId) === String(userId));
+}
+
+function randomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I — easy to read aloud
+  let s = "";
+  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+async function generateAccessCode(env, chatId) {
+  const code = randomCode();
+  await env.BOOKINGS.put(`guidecode:${code}`, "1", { expirationTtl: 60 * 60 * 24 });
+  await tgSendMessage(
+    env,
+    chatId,
+    `🔑 <b>New guide access code</b>\n\n<code>${code}</code>\n\nSend this to the new guide. They just open a chat with this bot and send the code as a plain message — no /commands needed.\n\nExpires in 24 hours, works once. Once redeemed they'll show up under "👥 Manage Guides", where you can remove their access any time.`,
+    { reply_markup: kb([[btn("⬅️ Main Menu", "home")]]) }
+  );
+}
+
+// Called from handleTelegramAdminUpdate for a message from someone who
+// isn't already an admin — the ONLY thing such a message is allowed to
+// do is redeem a valid code. Returns true if it handled the message
+// (redeemed or not, still counts as handled so the normal "you're not
+// an admin" refusal doesn't also fire), false to fall through to that
+// refusal as before.
+async function tryRedeemGuideCode(env, chatId, userId, msg) {
+  const raw = (msg.text || "").trim().toUpperCase();
+  const text = raw.replace(/^\/JOIN\s+/, "");
+  if (!/^[A-Z0-9]{6}$/.test(text)) return false;
+
+  const key = `guidecode:${text}`;
+  const exists = await env.BOOKINGS.get(key);
+  if (!exists) return false; // not a real/pending code — treat as a normal (refused) message
+
+  await env.BOOKINGS.delete(key); // one-time use
+
+  const name = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || msg.from?.username || String(userId);
+  const guides = await getGuides(env);
+  if (!guides.some((g) => String(g.userId) === String(userId))) {
+    guides.push({ userId: String(userId), name, addedAt: Date.now() });
+    await saveGuides(env, guides);
+  }
+
+  // Best-effort: hand them a link straight into the booking group too,
+  // so "access to future bookings" means actually seeing them land, not
+  // just bot-menu access. Silently skipped if the bot isn't an admin in
+  // that chat (or it's a 1:1 chat with no invite link) — never blocks
+  // the rest of the welcome message.
+  let inviteLine = "";
+  if (env.TELEGRAM_CHAT_ID) {
+    try {
+      const invite = await tg(env, "exportChatInviteLink", { chat_id: env.TELEGRAM_CHAT_ID });
+      if (invite && invite.ok && invite.result) inviteLine = `\n\n📎 Join the booking chat here: ${invite.result}`;
+    } catch (e) {
+      /* no invite link available — that's fine, admin can add them manually */
+    }
+  }
+
+  await tgSendMessage(
+    env,
+    chatId,
+    `✅ You're in, ${escapeHtml(name)}! You now have admin bot access — same menus as any other admin, including marking a visitor's chat 🟢 Active / ⚪ Not Active.${inviteLine}`
+  );
+  await sendMainMenu(env, chatId, "Welcome! Tap a button to get started 👇");
+  return true;
+}
+
+async function sendGuidesMenu(env, chatId, note) {
+  const guides = await getGuides(env);
+  if (!guides.length) {
+    await tgSendMessage(
+      env,
+      chatId,
+      (note ? note + "\n\n" : "") + `👥 No guides added yet. Tap "🔑 Generate Access Code" from the main menu to invite one.`,
+      { reply_markup: kb([[btn("⬅️ Main Menu", "home")]]) }
+    );
+    return;
+  }
+  const rows = guides.map((g) => [btn(`🗑️ Remove ${truncateLabel(g.name)}`, `guiderm:${g.userId}`)]);
+  rows.push([btn("⬅️ Main Menu", "home")]);
+  const list = guides.map((g) => `• ${escapeHtml(g.name)} — added ${new Date(g.addedAt).toLocaleDateString()}`).join("\n");
+  await tgSendMessage(env, chatId, (note ? note + "\n\n" : "") + `👥 <b>Guides with admin access</b>\n\n${list}`, { reply_markup: kb(rows) });
+}
+
+async function removeGuide(env, chatId, userId) {
+  const guides = await getGuides(env);
+  const next = guides.filter((g) => String(g.userId) !== String(userId));
+  await saveGuides(env, next);
+  await sendGuidesMenu(env, chatId, "✅ Removed — that access is revoked immediately.");
+}
+
 export async function handleTelegramAdminUpdate(env, update) {
   const msg = update.message;
   const cb = update.callback_query;
@@ -43,7 +164,13 @@ export async function handleTelegramAdminUpdate(env, update) {
   const chatId = msg?.chat?.id ?? cb?.message?.chat?.id;
   if (!chatId) return;
 
-  if (!isAdmin(env, userId)) {
+  const admin = isAdmin(env, userId) || (await isGuide(env, userId));
+
+  if (!admin) {
+    // Not an admin yet — the only thing a non-admin message is allowed
+    // to do is redeem a valid guide access code (see "🔑 Generate Access
+    // Code" in the main menu). Anything else gets the standard refusal.
+    if (msg && msg.text && (await tryRedeemGuideCode(env, chatId, userId, msg))) return;
     if (msg) await tgSendMessage(env, chatId, "❌ You're not an admin for this bot.");
     return;
   }
@@ -100,6 +227,15 @@ export async function handleTelegramAdminUpdate(env, update) {
 
 async function sendMainMenu(env, chatId, note) {
   const rows = CATEGORIES.map((c) => [btn(c.label, `pick:${c.kind}`)]);
+  // Quick-access shortcuts straight into the two new config trees added
+  // for the background-video/section-styling upgrade — same underlying
+  // data as "✏️ Edit Website Text" (background / sectionStyles live
+  // inside KC_CONTENT), just jumping past the top-level menu so admins
+  // don't have to know those keys exist to find them.
+  rows.push([btn("🎬 Background Manager", "bgpick")]);
+  rows.push([btn("🧱 Section Styling", "secpick")]);
+  rows.push([btn("👥 Manage Guides", "guides")]);
+  rows.push([btn("🔑 Generate Access Code", "gencode")]);
   rows.push([btn("🤖 ERA AI Assistant", "eraai")]);
   rows.push([btn("👁️ Preview Live Sites", "preview")]);
   rows.push([btn("📊 Live Stats", "stats")]);
@@ -241,6 +377,43 @@ async function changeConvStatus(env, chatId, sessionId, status) {
   await tgSendMessage(env, chatId, `Visitor #${conv.id} is now <b>${statusLabel(status)}</b>.`);
 }
 
+// Flips "an admin is actively, personally handling this visitor" for
+// one visitor. While active, booking.js skips sending that visitor's
+// booking confirm/reject pings to the group chat (see conversations.js)
+// — everything else (this chat thread, the AI/Human/Pause/Close
+// controls) keeps working exactly as it does today either way.
+async function toggleConvActive(env, chatId, sessionId) {
+  const conv = await toggleConversationActive(env, sessionId);
+  if (!conv) {
+    await tgSendMessage(env, chatId, "⚠️ Couldn't find that visitor's conversation — it may have expired.");
+    return;
+  }
+  await tgSendMessage(
+    env,
+    chatId,
+    conv.active
+      ? `🟢 Visitor #${conv.id} marked <b>Active</b> — their booking confirm/reject won't ping the group chat while this is on.`
+      : `⚪ Visitor #${conv.id} marked <b>Not Active</b> — their bookings will notify the group chat as normal.`
+  );
+}
+
+// Fully removes one visitor's chat id from ever generating a booking
+// notification again (spam/abuse) — not just silenced like "Active"
+// above, actually skipped in booking.js. Their bookings are still
+// recorded in KV so nothing is lost, they just never reach Telegram.
+async function toggleConvBlocked(env, chatId, sessionId) {
+  const conv = await getConversation(env, sessionId);
+  const nowBlocked = await toggleSessionBlocked(env, sessionId);
+  const label = conv ? `Visitor #${conv.id}` : "That chat id";
+  await tgSendMessage(
+    env,
+    chatId,
+    nowBlocked
+      ? `🚫 ${label} is now <b>blocked</b> — any booking they submit from now on will be recorded but won't be sent here.`
+      : `✅ ${label} <b>unblocked</b> — their bookings will notify the group chat as normal again.`
+  );
+}
+
 // Delivers an admin's free-form reply to a specific visitor. This is
 // the one function all three reply paths (Reply button, swipe-reply,
 // /reply command) funnel through. It does NOT force a takeover — per
@@ -298,6 +471,8 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "convtakeover") return changeConvStatus(env, chatId, rest.join(":"), "human");
   if (action === "convpause") return changeConvStatus(env, chatId, rest.join(":"), "paused");
   if (action === "convclose") return changeConvStatus(env, chatId, rest.join(":"), "closed");
+  if (action === "convactive") return toggleConvActive(env, chatId, rest.join(":"));
+  if (action === "convblock") return toggleConvBlocked(env, chatId, rest.join(":"));
 
   // ---- ERA AI ----
   if (action === "eraai") return sendEraMenu(env, chatId);
@@ -309,6 +484,12 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "erabulk") return startEraBulkTeach(env, chatId);
   if (action === "eradonebulk") return finishEraBulkTeach(env, chatId);
 
+  if (action === "bgpick") return sendSitePicker(env, chatId, "bgshortcut", SITES);
+  if (action === "secpick") return sendSitePicker(env, chatId, "secshortcut", SITES);
+  if (action === "gencode") return generateAccessCode(env, chatId);
+  if (action === "guides") return sendGuidesMenu(env, chatId);
+  if (action === "guiderm") return removeGuide(env, chatId, rest.join(":"));
+
   if (action === "pick") {
     const kind = rest[0];
     const cat = CATEGORIES.find((c) => c.kind === kind);
@@ -318,8 +499,20 @@ async function handleCallback(env, chatId, messageId, data) {
     return sendSitePicker(env, chatId, kind, cat.sites || SITES);
   }
 
+  // "bgshortcut"/"secshortcut" aren't real content kinds — they're
+  // just a shorter path to two spots already inside the "content" tree
+  // (KC_CONTENT.background / KC_CONTENT.sectionStyles). Translating to
+  // the real kind here (rather than inventing a parallel "kind") means
+  // every existing save/reset/breadcrumb function keeps working
+  // unchanged, and — critically — "Reset ALL" from this shortcut still
+  // means "reset all of Website Text", never a separate/smaller scope
+  // that could desync from what actually renders on the site.
+  const SHORTCUT_START_PATHS = { bgshortcut: ["background"], secshortcut: ["sectionStyles"] };
+
   if (action === "site") {
     const [kind, site] = rest;
+    const startPath = SHORTCUT_START_PATHS[kind];
+    if (startPath) return openTree(env, chatId, { kind: "content", site, path: [...startPath] });
     return openTree(env, chatId, { kind, site, path: [] });
   }
 
