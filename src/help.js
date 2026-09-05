@@ -155,6 +155,18 @@ export function paginate(items, page, pageSize, pageAction) {
 // real action — that's the whole extension pattern (see file header).
 // ---------------------------------------------------------------------
 
+registerHelp("paymentgateway", {
+  title: "💳 Payment Gateway",
+  intro: "Scaffolding for a real payment gateway — no gateway is live yet, this is where you'll set one up once you have a merchant account.",
+  questions: [
+    { q: "What is this?", a: "Per-site payment configuration: pick a provider (Razorpay/Stripe/PayPal), paste in its API credentials, set the currency, and turn it on." },
+    { q: "Is it actually charging cards right now?", a: "No — the architecture (order tracking, webhook handling, admin notifications) is ready, but each gateway's real API calls are still a deliberate TODO until you have a live account to test against." },
+    { q: "Are my credentials safe?", a: "Yes — they're stored server-side only, never shown here in full again (just the last 4 characters), and never sent to the website." },
+    { q: "What's the Webhook URL for?", a: "Paste it into your gateway's own dashboard so it can tell this bot when a payment succeeds, fails, or gets refunded." },
+  ],
+  backAction: "paypick",
+});
+
 registerHelp("mainmenu", {
   title: "Website Admin — Main Menu",
   intro: "This is the top-level hub. Every category below opens its own submenu.",

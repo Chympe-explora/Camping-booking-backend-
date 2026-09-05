@@ -18,6 +18,14 @@ import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tg, tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
 import { helpButton, handleHelpCallback, smallRows } from "./help.js";
 import { getLiveStats, resetStats } from "./stats.js";
+import {
+  GATEWAYS,
+  getPaymentConfig,
+  savePaymentConfig,
+  setCredentialField,
+  getMaskedCredentials,
+  webhookUrlFor,
+} from "./payments.js";
 import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
 import { getConversation, getConversationByShortId, setConversationStatus, toggleConversationActive, toggleSessionBlocked, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
 import {
@@ -201,6 +209,7 @@ async function sendMainMenu(env, chatId, note) {
     btn("📹 BG Video", "vidpick"),
     btn("🔤 Fonts & Colors", "fontpick"),
     btn("🧭 Guides", "guidemgmt"),
+    btn("💳 Payment Gateway", "paypick"),
     btn("🤖 ERA AI", "eraai"),
     btn("👁️ Preview", "preview"),
     btn("📊 Stats", "stats"),
@@ -215,6 +224,106 @@ async function sendMainMenu(env, chatId, note) {
 }
 
 // ---------------- GUIDE MANAGEMENT (admin side) ----------------
+
+// ---------------- 💳 PAYMENT GATEWAY ----------------
+// Scaffolding only — no gateway is actually wired to a live merchant
+// account (see payments.js's top comment for why, and what "ready for
+// later" means here). This menu is where all of that gets configured
+// once a real account exists: pick a provider, paste in its
+// credentials, set the currency, flip it on, and copy the webhook URL
+// into that gateway's own dashboard.
+
+async function sendPaymentSitePicker(env, chatId) {
+  const rows = SITES.map((s) => [btn(SITE_LABELS[s] || s, `paysite:${s}`)]);
+  rows.push([btn("⬅️ Back", "home"), helpButton("paymentgateway")]);
+  await tgSendMessage(env, chatId, "💳 <b>Payment Gateway</b>\n\nWhich site?", { reply_markup: kb(rows) });
+}
+
+async function sendPaymentMenu(env, chatId, site, note) {
+  const config = await getPaymentConfig(env, site);
+  const gw = GATEWAYS[config.provider];
+  const creds = await getMaskedCredentials(env, site);
+
+  const lines = [
+    (note ? note + "\n\n" : "") + `💳 <b>Payment Gateway — ${SITE_LABELS[site] || site}</b>`,
+    `Provider: <b>${gw ? gw.label : "None selected"}</b>`,
+    `Status: ${config.enabled ? "🟢 Enabled" : "🔴 Disabled"}`,
+    `Currency: <b>${config.currency || "INR"}</b>`,
+  ];
+  if (gw && creds.length) {
+    lines.push("", "<b>Credentials:</b>");
+    for (const c of creds) lines.push(`${c.isSet ? "✅" : "⚪"} ${c.label}: <code>${escapeHtml(String(c.value))}</code>`);
+  }
+
+  const rows = [
+    [btn("🔌 Select Gateway", `paygw:${site}`)],
+  ];
+  if (gw) {
+    for (const f of gw.fields) {
+      rows.push([btn(`🔑 Set ${f.label}`, `paycredfield:${site}:${f.key}`)]);
+    }
+    rows.push([btn("💱 Set Currency", `paycurrency:${site}`)]);
+    rows.push([btn(config.enabled ? "🔴 Disable" : "🟢 Enable", `paytoggle:${site}`)]);
+    rows.push([btn("🔔 Webhook URL", `paywebhook:${site}`)]);
+  }
+  rows.push([btn("⬅️ Back", "paypick"), helpButton("paymentgateway")]);
+
+  await tgSendMessage(env, chatId, lines.join("\n"), { reply_markup: kb(rows) });
+}
+
+async function choosePaymentGateway(env, chatId, site) {
+  const rows = Object.keys(GATEWAYS).map((key) => [btn(GATEWAYS[key].label, `paygwset:${site}:${key}`)]);
+  rows.push([btn("🚫 None (turn off)", `paygwset:${site}:none`)]);
+  rows.push([btn("⬅️ Back", `paysite:${site}`)]);
+  await tgSendMessage(env, chatId, `Which gateway for ${SITE_LABELS[site] || site}?`, { reply_markup: kb(rows) });
+}
+
+async function setPaymentGateway(env, chatId, site, provider) {
+  const config = await getPaymentConfig(env, site);
+  config.provider = provider;
+  config.enabled = false; // switching providers always requires re-enabling deliberately, never silently stays on with the old provider's credentials
+  await savePaymentConfig(env, site, config);
+  await sendPaymentMenu(env, chatId, site, provider === "none" ? "Gateway turned off." : `Switched to ${GATEWAYS[provider].label}. Now set its credentials below.`);
+}
+
+async function startCredentialInput(env, chatId, rest) {
+  const [site, key] = rest.split(":");
+  const config = await getPaymentConfig(env, site);
+  const gw = GATEWAYS[config.provider];
+  const field = gw && gw.fields.find((f) => f.key === key);
+  if (!field) return sendPaymentMenu(env, chatId, site, "⚠️ Pick a gateway first.");
+  await setSession(env, chatId, { awaiting: { type: "paymentcred", site, key } });
+  await tgSendMessage(
+    env,
+    chatId,
+    `Send the new value for <b>${escapeHtml(field.label)}</b> (${gw.label}, ${SITE_LABELS[site] || site}).\n\nIt's stored securely on the server only — never shown in full again, never sent to the website.`,
+    { reply_markup: kb([[btn("❌ Cancel", `paysite:${site}`)]]) }
+  );
+}
+
+async function startCurrencyInput(env, chatId, site) {
+  await setSession(env, chatId, { awaiting: { type: "paymentcurrency", site } });
+  await tgSendMessage(env, chatId, `Send the 3-letter currency code (e.g. INR, USD, EUR) for ${SITE_LABELS[site] || site}.`, {
+    reply_markup: kb([[btn("❌ Cancel", `paysite:${site}`)]]),
+  });
+}
+
+async function togglePaymentEnabled(env, chatId, site) {
+  const config = await getPaymentConfig(env, site);
+  config.enabled = !config.enabled;
+  await savePaymentConfig(env, site, config);
+  await sendPaymentMenu(env, chatId, site);
+}
+
+async function showWebhookUrl(env, chatId, site) {
+  const url = webhookUrlFor(env, site);
+  await tgSendMessage(
+    env,
+    chatId,
+    `🔔 <b>Webhook URL for ${SITE_LABELS[site] || site}</b>\n\n<code>${escapeHtml(url)}</code>\n\nPaste this into your gateway's dashboard (Razorpay/Stripe/PayPal each call it something slightly different — "Webhook URL", "Endpoint URL", etc.) so it can tell this bot when a payment succeeds or fails.`,
+    { reply_markup: kb([[btn("⬅️ Back", `paysite:${site}`)]]) }
+  );
+}
 
 async function sendGuideManagementMenu(env, chatId, note) {
   const guides = await getGuides(env);
@@ -819,8 +928,13 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "secpick") return sendSitePicker(env, chatId, "secshortcut", SITES);
   if (action === "herobtnpick") return sendSitePicker(env, chatId, "herobtnshortcut", SITES);
   if (action === "vidpick") return sendSitePicker(env, chatId, "vidupload", SITES);
+  if (action === "vidtarget") {
+    const [site, target] = rest;
+    return startVideoUploadForTarget(env, chatId, site, target);
+  }
 
   if (action === "herobtnreset") return resetHeroButtonToDefault(env, chatId, rest.join(":"));
+  if (action === "herobtnrmlink") return removeHeroButtonLink(env, chatId, rest.join(":"));
   // ---- 🔤 Fonts & Colors (heading/body size + color, per page/section) ----
   if (action === "fontpick") return sendSitePicker(env, chatId, "fontsite", SITES);
   if (action === "fontsection") {
@@ -857,6 +971,18 @@ async function handleCallback(env, chatId, messageId, data) {
   }
 
   if (action === "guidemgmt") return sendGuideManagementMenu(env, chatId);
+
+  if (action === "paypick") return sendPaymentSitePicker(env, chatId);
+  if (action === "paysite") return sendPaymentMenu(env, chatId, rest.join(":"));
+  if (action === "paygw") return choosePaymentGateway(env, chatId, rest.join(":"));
+  if (action === "paygwset") {
+    const [site, provider] = rest;
+    return setPaymentGateway(env, chatId, site, provider);
+  }
+  if (action === "paycredfield") return startCredentialInput(env, chatId, rest.join(":"));
+  if (action === "paycurrency") return startCurrencyInput(env, chatId, rest.join(":"));
+  if (action === "paytoggle") return togglePaymentEnabled(env, chatId, rest.join(":"));
+  if (action === "paywebhook") return showWebhookUrl(env, chatId, rest.join(":"));
   if (action === "addguide") return startAddGuide(env, chatId);
   if (action === "addguidesite") return chooseAddGuideSite(env, chatId, rest.join(":"));
   if (action === "addguidesvc") return toggleAddGuideService(env, chatId, rest.join(":"));
@@ -895,8 +1021,7 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "site") {
     const [kind, site] = rest;
     if (kind === "fontsite") return sendFontSectionPicker(env, chatId, site);
-    if (kind === "vidupload") return startVideoUpload(env, chatId, site);
-    const startPath = SHORTCUT_START_PATHS[kind];
+    if (kind === "vidupload") return startVideoUpload(env, chatId, site);    const startPath = SHORTCUT_START_PATHS[kind];
     if (startPath) {
       await openTree(env, chatId, { kind: "content", site, path: [...startPath] });
       if (kind === "herobtnshortcut") {
@@ -906,7 +1031,7 @@ async function handleCallback(env, chatId, messageId, data) {
         // lives at a completely different top-level key and this never
         // touches. See resetHeroButtonToDefault below.
         await tgSendMessage(env, chatId, "Just the hero button, not the nav menu:", {
-          reply_markup: kb([[btn("🔄 Reset Hero Button to Default", `herobtnreset:${site}`)]]),
+          reply_markup: kb([[btn("🔄 Reset Hero Button to Default", `herobtnreset:${site}`)], [btn("🗑 Remove Link", `herobtnrmlink:${site}`)]]),
         });
       }
       return;
@@ -1344,12 +1469,49 @@ async function resetHeroButtonToDefault(env, chatId, site) {
   );
 }
 
-async function startVideoUpload(env, chatId, site) {
-  await setSession(env, chatId, { awaiting: { type: "video", site } });
+// Narrower than the full reset above — clears ONLY the link override,
+// leaving the button's label and normal scroll/page destination
+// exactly as they are. This is what turns the button back to "just
+// scrolls/switches page like normal" without also resetting its text.
+async function removeHeroButtonLink(env, chatId, site) {
+  const override = await getDoc(env, `content:${site}`, {});
+  deletePath(override, "hero.bookNowLink");
+  await saveDoc(env, `content:${site}`, override, { logChange: "Hero button link removed" });
   await tgSendMessage(
     env,
     chatId,
-    `🎬 <b>New background video — ${SITE_LABELS[site] || site}</b>\n\nSend the video now, right here in this chat (as a normal video message, not a document). It'll replace the current site-wide background video and go live immediately — no other steps needed.\n\n<i>Telegram caps bot uploads at 50MB — if yours is bigger, compress it first.</i>`,
+    `✅ Link removed from the hero button on ${SITE_LABELS[site] || site} — it now scrolls/switches page like normal again. Label and destination page are unchanged.`,
+    { reply_markup: kb([[btn("🔘 Hero Button (text & link)", "herobtnpick")], [btn("⬅️ Main Menu", "home")]]) }
+  );
+}
+
+// A hero video upload can target either of two different things, and
+// it matters which:
+//   - "background": the site-wide FIXED video behind the whole page
+//     (background.global.videoUrl — see background-system.js), visible
+//     on every section, not just the hero banner.
+//   - "hero": the Hero banner's OWN video (hero.videoUrl), the one that
+//     plays specifically inside the top hero section, independent of
+//     whatever the site-wide background is doing.
+// Both live on all 3 sites' hero sections — this lets an admin update
+// either one straight from Telegram, no code/redeploy needed either way.
+async function startVideoUpload(env, chatId, site) {
+  await tgSendMessage(env, chatId, `🎬 <b>${SITE_LABELS[site] || site}</b> — which video?`, {
+    reply_markup: kb([
+      [btn("🌐 Site-wide Background Video", `vidtarget:${site}:background`)],
+      [btn("🎭 Hero Banner Video", `vidtarget:${site}:hero`)],
+      [btn("❌ Cancel", "cancel")],
+    ]),
+  });
+}
+
+async function startVideoUploadForTarget(env, chatId, site, target) {
+  await setSession(env, chatId, { awaiting: { type: "video", site, target } });
+  const targetLabel = target === "hero" ? "the Hero banner's own video" : "the site-wide fixed background video";
+  await tgSendMessage(
+    env,
+    chatId,
+    `🎬 <b>New video — ${SITE_LABELS[site] || site}</b>\n\nSend the video now, right here in this chat (as a normal video message, not a document). It'll replace ${targetLabel} and go live immediately — no other steps needed.\n\n<i>Telegram caps bot uploads at 50MB — if yours is bigger, compress it first.</i>`,
     { reply_markup: kb([[btn("❌ Cancel", "cancel")]]) }
   );
 }
@@ -1453,6 +1615,34 @@ async function handleAwaitedInput(env, chatId, session, msg) {
     return applyFontValue(env, chatId, site, key, `${which}${isSize ? "Size" : "Color"}`, text);
   }
 
+  if (awaiting.type === "paymentcred") {
+    const value = (msg.text ?? "").trim();
+    if (!value) {
+      await tgSendMessage(env, chatId, "Please send the value as plain text, or tap Cancel.", { reply_markup: kb([[btn("❌ Cancel", `paysite:${awaiting.site}`)]]) });
+      return;
+    }
+    await setCredentialField(env, awaiting.site, awaiting.key, value);
+    await clearSession(env, chatId);
+    await sendPaymentMenu(env, chatId, awaiting.site, "✅ Saved.");
+    return;
+  }
+
+  if (awaiting.type === "paymentcurrency") {
+    const code = (msg.text ?? "").trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(code)) {
+      await tgSendMessage(env, chatId, "That doesn't look like a 3-letter currency code (e.g. INR, USD). Try again, or tap Cancel.", {
+        reply_markup: kb([[btn("❌ Cancel", `paysite:${awaiting.site}`)]]),
+      });
+      return;
+    }
+    const config = await getPaymentConfig(env, awaiting.site);
+    config.currency = code;
+    await savePaymentConfig(env, awaiting.site, config);
+    await clearSession(env, chatId);
+    await sendPaymentMenu(env, chatId, awaiting.site, "✅ Saved.");
+    return;
+  }
+
   if (awaiting.type === "guidename") {
     const name = (msg.text ?? "").trim();
     if (!name) {
@@ -1475,30 +1665,41 @@ async function handleAwaitedInput(env, chatId, session, msg) {
       return;
     }
     const site = awaiting.site;
+    const target = awaiting.target === "hero" ? "hero" : "background"; // default for older sessions started before the choice existed
     const fileId = video.file_id;
 
-    // Store the raw file_id (same pattern as images), then re-point
-    // background.global.videoUrl at the stable proxy route that
-    // resolves it fresh on every request — see content-api.js's
-    // handleVideoMedia. This is what makes it "go live automatically":
-    // the website already reads background.global.videoUrl on every
-    // load, it just now points here instead of a static filename.
+    // Store the raw file_id (same pattern as images) under a key that
+    // matches which video this actually is, then re-point the matching
+    // config field at the stable proxy route that resolves it fresh on
+    // every request — see content-api.js's handleVideoMedia. This is
+    // what makes it "go live automatically": the website already reads
+    // that field on every load, it just now points here instead of a
+    // static filename.
+    //   target "background" -> videos:<site>.global  -> background.global.videoUrl
+    //   target "hero"        -> videos:<site>.hero    -> hero.videoUrl
+    const videoKey = target === "hero" ? "hero" : "global";
     const videosDoc = await getDoc(env, `videos:${site}`, {});
-    videosDoc.global = fileId;
-    await saveDoc(env, `videos:${site}`, videosDoc, { logChange: "Uploaded new background video" });
+    videosDoc[videoKey] = fileId;
+    await saveDoc(env, `videos:${site}`, videosDoc, { logChange: target === "hero" ? "Uploaded new hero banner video" : "Uploaded new background video" });
 
-    const proxyUrl = `${env.WORKER_BASE_URL || DEFAULT_WORKER_BASE_URL}/media-video/${site}/global`;
+    const proxyUrl = `${env.WORKER_BASE_URL || DEFAULT_WORKER_BASE_URL}/media-video/${site}/${videoKey}`;
     const override = await getDoc(env, `content:${site}`, {});
-    setPath(override, "background.global.videoUrl", proxyUrl);
-    setPath(override, "background.global.videoEnabled", true);
-    setPath(override, "background.global.enabled", true);
-    await saveDoc(env, `content:${site}`, override, { logChange: "Background video → uploaded via Telegram" });
+    if (target === "hero") {
+      setPath(override, "hero.videoUrl", proxyUrl);
+      setPath(override, "hero.videoEnabled", true);
+      setPath(override, "hero.enabled", true);
+    } else {
+      setPath(override, "background.global.videoUrl", proxyUrl);
+      setPath(override, "background.global.videoEnabled", true);
+      setPath(override, "background.global.enabled", true);
+    }
+    await saveDoc(env, `content:${site}`, override, { logChange: (target === "hero" ? "Hero banner video" : "Background video") + " → uploaded via Telegram" });
 
     await clearSession(env, chatId);
     await tgSendMessage(
       env,
       chatId,
-      `✅ New background video is live on <b>${SITE_LABELS[site] || site}</b> right now — no other steps needed.`,
+      `✅ New ${target === "hero" ? "hero banner" : "background"} video is live on <b>${SITE_LABELS[site] || site}</b> right now — no other steps needed.`,
       { reply_markup: kb([[btn("⬅️ Main Menu", "home")]]) }
     );
     return;

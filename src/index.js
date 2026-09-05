@@ -78,6 +78,8 @@ import { handleGetContent, handleGetPrices, handleGetImages, handleGetHighlights
 import { handleTelegramAdminUpdate } from "./telegram-bot.js";
 import { handleEraMessage, handleEraPoll, handleEraTyping } from "./era-ai.js";
 import { handleGetRatings, handleSubmitRating } from "./ratings.js";
+import { createOrder, getOrder, handlePaymentWebhook } from "./payments.js";
+import { tgSendMessage } from "./telegram.js";
 
 export default {
   async fetch(request, env, ctx) {
@@ -106,6 +108,43 @@ export default {
       if (url.pathname.startsWith("/api/refund-status/") && request.method === "GET") {
         const id = url.pathname.split("/").pop();
         return handleRefundStatus(id, env);
+      }
+
+      // ---- payment gateway scaffolding (new) — see payments.js. Not a
+      // real payment flow yet (no gateway is wired to a live merchant
+      // account) — these endpoints exist so a real gateway integration
+      // later is just filling in payments.js's adapter TODOs and
+      // pasting in credentials from Telegram admin, no other changes. ----
+      if (url.pathname === "/api/payment/create-order" && request.method === "POST") {
+        const { siteId, bookingId, amount, currency } = await request.json();
+        const { order, checkout, error } = await createOrder(env, siteId, bookingId, amount, currency);
+        return json({ ok: !error, order, checkout, error: error || undefined }, env, error ? 409 : 200);
+      }
+      if (url.pathname.startsWith("/api/payment/status/") && request.method === "GET") {
+        const orderId = url.pathname.split("/").pop();
+        const order = await getOrder(env, orderId);
+        return json(order ? { ok: true, order } : { ok: false, error: "not found" }, env, order ? 200 : 404);
+      }
+      if (url.pathname.startsWith("/api/payment/webhook/") && request.method === "POST") {
+        const site = url.pathname.split("/").pop();
+        try {
+          const order = await handlePaymentWebhook(env, site, request);
+          if (order) {
+            const chatId = env.TELEGRAM_CHAT_ID;
+            if (chatId) {
+              ctx.waitUntil(
+                tgSendMessage(
+                  env,
+                  chatId,
+                  `\ud83d\udcb3 <b>Payment update</b> — order ${order.orderId}\nBooking: ${order.bookingId || "—"}\nStatus: <b>${order.status}</b>\nAmount: ${order.amount} ${order.currency}`
+                ).catch(() => {})
+              );
+            }
+          }
+          return json({ ok: true }, env);
+        } catch (e) {
+          return json({ ok: false, error: e.message || "webhook error" }, env, 400);
+        }
       }
 
       // ---- content / pricing (new) ----
