@@ -19,6 +19,21 @@ import { tg, tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js
 import { getLiveStats, resetStats } from "./stats.js";
 import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
 import { getConversation, getConversationByShortId, setConversationStatus, toggleConversationActive, toggleSessionBlocked, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
+import {
+  SITE_PACKAGES,
+  GUIDE_SITES,
+  getGuides,
+  getGuide,
+  getGuideByChatId,
+  isLinkedGuide,
+  createGuide,
+  regenerateGuideCode,
+  redeemGuideCode,
+  setGuideActive,
+  setGuideBookingAccess,
+  removeGuide as removeGuideRecord,
+  getGuideBookingIds,
+} from "./guides.js";
 
 // The Worker's own public URL — used to build the /media-video proxy
 // link an uploaded background video is served from (see
@@ -44,53 +59,20 @@ function isAdmin(env, userId) {
 }
 
 // ---------------------------------------------------------------------
-// GUIDE ACCESS CODES — self-service way to add a new guide as an admin
-// without touching ADMIN_USER_IDS / the Cloudflare dashboard. One admin
-// taps "🔑 Generate Access Code", shares the 6-character code with the
-// new guide, and the new guide just sends that code as a plain message
-// to this bot. One-time use, expires after 24 hours.
+// GUIDE ACCESS CODES — self-service way to link a new guide's Telegram
+// chat to a guide profile the admin already created (name + site +
+// which packages they cover — see "➕ Add Guide" below), without
+// touching ADMIN_USER_IDS / the Cloudflare dashboard. One admin creates
+// the guide, shares the 6-character code, the new guide just sends
+// that code as a plain message to this bot. One-time use, expires
+// after 7 days.
 //
-// Guides added this way are stored in KV (guides:list), on top of
-// whatever's already in the static ADMIN_USER_IDS env var — isAdmin()
-// checks both. Storing them separately (rather than trying to mutate
-// ADMIN_USER_IDS, which isn't writable at runtime anyway) means adding
-// or removing a guide takes effect immediately, no redeploy needed.
+// A linked guide is NOT the same as a full admin — they get their own
+// separate Guide Dashboard menu (bookings assigned to them, their own
+// 🟢/🔴 Active toggle, My Services, My Account), not the content-editing
+// admin menu. See sendGuideMenu below, and the isAdmin/isLinkedGuide
+// branch in handleTelegramAdminUpdate.
 // ---------------------------------------------------------------------
-export async function getGuides(env) {
-  const raw = await env.BOOKINGS.get("guides:list");
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-async function saveGuides(env, guides) {
-  await env.BOOKINGS.put("guides:list", JSON.stringify(guides));
-}
-
-async function isGuide(env, userId) {
-  const guides = await getGuides(env);
-  return guides.some((g) => String(g.userId) === String(userId));
-}
-
-function randomCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I — easy to read aloud
-  let s = "";
-  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
-
-async function generateAccessCode(env, chatId) {
-  const code = randomCode();
-  await env.BOOKINGS.put(`guidecode:${code}`, "1", { expirationTtl: 60 * 60 * 24 });
-  await tgSendMessage(
-    env,
-    chatId,
-    `🔑 <b>New guide access code</b>\n\n<code>${code}</code>\n\nSend this to the new guide. They just open a chat with this bot and send the code as a plain message — no /commands needed.\n\nExpires in 24 hours, works once. Once redeemed they'll show up under "👥 Manage Guides", where you can remove their access any time.`,
-    { reply_markup: kb([[btn("⬅️ Main Menu", "home")]]) }
-  );
-}
 
 // Called from handleTelegramAdminUpdate for a message from someone who
 // isn't already an admin — the ONLY thing such a message is allowed to
@@ -103,67 +85,19 @@ async function tryRedeemGuideCode(env, chatId, userId, msg) {
   const text = raw.replace(/^\/JOIN\s+/, "");
   if (!/^[A-Z0-9]{6}$/.test(text)) return false;
 
-  const key = `guidecode:${text}`;
-  const exists = await env.BOOKINGS.get(key);
-  if (!exists) return false; // not a real/pending code — treat as a normal (refused) message
+  const guide = await redeemGuideCode(env, text, userId);
+  if (!guide) return false; // not a real/pending code — treat as a normal (refused) message
 
-  await env.BOOKINGS.delete(key); // one-time use
-
-  const name = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || msg.from?.username || String(userId);
-  const guides = await getGuides(env);
-  if (!guides.some((g) => String(g.userId) === String(userId))) {
-    guides.push({ userId: String(userId), name, addedAt: Date.now() });
-    await saveGuides(env, guides);
-  }
-
-  // Best-effort: also hand them a link into the booking group chat, in
-  // case they want the shared history/discussion too. Not required for
-  // bookings to reach them though — every new booking now gets sent
-  // directly here, to this DM, with working Confirm/Reject buttons (see
-  // recipientChatIds in booking.js). Silently skipped if the bot isn't
-  // an admin in that group (or it's a 1:1 chat with no invite link) —
-  // never blocks the rest of the welcome message.
-  let inviteLine = "";
-  if (env.TELEGRAM_CHAT_ID) {
-    try {
-      const invite = await tg(env, "exportChatInviteLink", { chat_id: env.TELEGRAM_CHAT_ID });
-      if (invite && invite.ok && invite.result) inviteLine = `\n\n📎 You can also join the booking group chat here: ${invite.result}`;
-    } catch (e) {
-      /* no invite link available — that's fine, admin can add them manually */
-    }
-  }
+  const packages = (SITE_PACKAGES[guide.site] || []).filter((p) => guide.services.includes("all") || guide.services.includes(p.key));
+  const servicesLine = guide.services.includes("all") ? "All Services" : packages.map((p) => p.label).join(", ") || guide.services.join(", ");
 
   await tgSendMessage(
     env,
     chatId,
-    `✅ You're in, ${escapeHtml(name)}! From now on, every new booking will be sent right here with its own ✅ Confirm / ❌ Reject buttons and all the trip details — tap either one and it's settled everywhere at once. You also get the same admin bot menus as anyone else, including marking a visitor's chat 🟢 Active / ⚪ Not Active.${inviteLine}`
+    `✅ You're linked, ${escapeHtml(guide.name)}!\n\n<b>Site:</b> ${SITE_LABELS[guide.site] || guide.site}\n<b>Services:</b> ${escapeHtml(servicesLine)}\n\nWhile you're 🟢 Active, new bookings for your services will be sent to you right here — with full details and ✅ Confirm / ❌ Reject buttons. Tap "📊 Dashboard" any time to see what's assigned to you.`
   );
-  await sendMainMenu(env, chatId, "Welcome! Tap a button to get started 👇");
+  await sendGuideMenu(env, chatId, guide);
   return true;
-}
-
-async function sendGuidesMenu(env, chatId, note) {
-  const guides = await getGuides(env);
-  if (!guides.length) {
-    await tgSendMessage(
-      env,
-      chatId,
-      (note ? note + "\n\n" : "") + `👥 No guides added yet. Tap "🔑 Generate Access Code" from the main menu to invite one.`,
-      { reply_markup: kb([[btn("⬅️ Main Menu", "home")]]) }
-    );
-    return;
-  }
-  const rows = guides.map((g) => [btn(`🗑️ Remove ${truncateLabel(g.name)}`, `guiderm:${g.userId}`)]);
-  rows.push([btn("⬅️ Main Menu", "home")]);
-  const list = guides.map((g) => `• ${escapeHtml(g.name)} — added ${new Date(g.addedAt).toLocaleDateString()}`).join("\n");
-  await tgSendMessage(env, chatId, (note ? note + "\n\n" : "") + `👥 <b>Guides with admin access</b>\n\n${list}`, { reply_markup: kb(rows) });
-}
-
-async function removeGuide(env, chatId, userId) {
-  const guides = await getGuides(env);
-  const next = guides.filter((g) => String(g.userId) !== String(userId));
-  await saveGuides(env, next);
-  await sendGuidesMenu(env, chatId, "✅ Removed — that access is revoked immediately.");
 }
 
 export async function handleTelegramAdminUpdate(env, update) {
@@ -174,14 +108,34 @@ export async function handleTelegramAdminUpdate(env, update) {
   const chatId = msg?.chat?.id ?? cb?.message?.chat?.id;
   if (!chatId) return;
 
-  const admin = isAdmin(env, userId) || (await isGuide(env, userId));
+  const realAdmin = isAdmin(env, userId);
+  const guide = realAdmin ? null : await getGuideByChatId(env, userId);
 
-  if (!admin) {
-    // Not an admin yet — the only thing a non-admin message is allowed
-    // to do is redeem a valid guide access code (see "🔑 Generate Access
-    // Code" in the main menu). Anything else gets the standard refusal.
+  if (!realAdmin && !guide) {
+    // Not recognized at all yet — the only thing such a message is
+    // allowed to do is redeem a valid guide access code (see "➕ Add
+    // Guide" in Guide Management). Anything else gets the standard
+    // refusal.
     if (msg && msg.text && (await tryRedeemGuideCode(env, chatId, userId, msg))) return;
-    if (msg) await tgSendMessage(env, chatId, "❌ You're not an admin for this bot.");
+    if (msg) await tgSendMessage(env, chatId, "❌ You're not recognized by this bot yet.");
+    return;
+  }
+
+  // A linked guide gets an entirely separate, much smaller menu (their
+  // own bookings, their own 🟢/🔴 toggle, My Services, My Account) —
+  // never the content-editing admin menu. Buttons only, per spec, so
+  // there's no text-input flow to handle here at all.
+  if (guide && !realAdmin) {
+    if (cb) {
+      await tgAnswerCallbackQuery(env, cb.id);
+      await handleGuideCallback(env, chatId, guide, cb.data);
+      return;
+    }
+    if (msg?.text === "/start" || msg?.text === "/menu") {
+      await sendGuideMenu(env, chatId, guide);
+      return;
+    }
+    await sendGuideMenu(env, chatId, guide, "Tap a button to get started 👇");
     return;
   }
 
@@ -246,8 +200,7 @@ async function sendMainMenu(env, chatId, note) {
   rows.push([btn("🧱 Section Styling", "secpick")]);
   rows.push([btn("🔘 Hero Button (text & link)", "herobtnpick")]);
   rows.push([btn("📹 Upload Background Video", "vidpick")]);
-  rows.push([btn("👥 Manage Guides", "guides")]);
-  rows.push([btn("🔑 Generate Access Code", "gencode")]);
+  rows.push([btn("🧭 Guide Management", "guidemgmt")]);
   rows.push([btn("🤖 ERA AI Assistant", "eraai")]);
   rows.push([btn("👁️ Preview Live Sites", "preview")]);
   rows.push([btn("📊 Live Stats", "stats")]);
@@ -256,6 +209,352 @@ async function sendMainMenu(env, chatId, note) {
     (note ? note + "\n\n" : "") +
     "👑 <b>Website Admin</b>\nWhat do you want to do?";
   await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+// ---------------- GUIDE MANAGEMENT (admin side) ----------------
+
+async function sendGuideManagementMenu(env, chatId, note) {
+  const guides = await getGuides(env);
+  const rows = [
+    [btn("➕ Add Guide", "addguide")],
+    [btn(`👥 Guides (${guides.length})`, "guidelist")],
+    [btn("⬅️ Main Menu", "home")],
+  ];
+  await tgSendMessage(
+    env,
+    chatId,
+    (note ? note + "\n\n" : "") + "🧭 <b>Guide Management</b>\n\nCreate guides, assign them to Package 1 / Package 2 / Private Tour / All Services, and control who's currently eligible for new bookings.",
+    { reply_markup: kb(rows) }
+  );
+}
+
+async function startAddGuide(env, chatId) {
+  await setSession(env, chatId, { awaiting: { type: "guidename" } });
+  await tgSendMessage(env, chatId, "➕ <b>Add Guide</b>\n\nWhat's this guide's name? Send it as a plain message.", {
+    reply_markup: kb([[btn("❌ Cancel", "guidemgmt")]]),
+  });
+}
+
+async function chooseAddGuideSite(env, chatId, site) {
+  const session = await getSession(env, chatId);
+  const name = session?.addGuide?.name;
+  if (!name) return sendGuideManagementMenu(env, chatId, "⚠️ Let's start over.");
+  await setSession(env, chatId, { addGuide: { name, site, services: [] } });
+  await sendServicePicker(env, chatId, site, []);
+}
+
+async function sendServicePicker(env, chatId, site, selected) {
+  const packages = SITE_PACKAGES[site] || [];
+  const rows = packages.map((p) => [
+    btn(`${selected.includes(p.key) ? "☑️" : "⬜"} ${p.label}`, `addguidesvc:${p.key}`),
+  ]);
+  rows.push([btn("✅ All Services", "addguideall")]);
+  rows.push([btn(`✅ Done (${selected.length} selected)`, "addguidedone")]);
+  rows.push([btn("❌ Cancel", "guidemgmt")]);
+  await tgSendMessage(
+    env,
+    chatId,
+    `📦 <b>Which services does this guide cover?</b>\n\nTap each package to toggle it, or just tap "All Services". Then tap Done.`,
+    { reply_markup: kb(rows) }
+  );
+}
+
+async function toggleAddGuideService(env, chatId, key) {
+  const session = await getSession(env, chatId);
+  const ag = session?.addGuide;
+  if (!ag || !ag.site) return sendGuideManagementMenu(env, chatId, "⚠️ Let's start over.");
+  const services = ag.services.includes(key) ? ag.services.filter((s) => s !== key) : [...ag.services, key];
+  await setSession(env, chatId, { addGuide: { ...ag, services } });
+  await sendServicePicker(env, chatId, ag.site, services);
+}
+
+async function finishAddGuide(env, chatId, allServices) {
+  const session = await getSession(env, chatId);
+  const ag = session?.addGuide;
+  if (!ag || !ag.site) return sendGuideManagementMenu(env, chatId, "⚠️ Let's start over.");
+  if (!allServices && ag.services.length === 0) {
+    return sendServicePicker(env, chatId, ag.site, ag.services); // nudge them to pick at least one or tap All Services
+  }
+  const services = allServices ? ["all"] : ag.services;
+  const { guide, code } = await createGuide(env, { name: ag.name, site: ag.site, services });
+  await clearSession(env, chatId);
+  await tgSendMessage(
+    env,
+    chatId,
+    `✅ <b>${escapeHtml(guide.name)}</b> created (${SITE_LABELS[guide.site] || guide.site}).\n\n🔑 <b>Their access code:</b>\n<code>${code}</code>\n\nSend this to them. They just open a chat with this bot and send the code as a plain message — no /commands needed. Expires in 7 days, works once.`,
+    { reply_markup: kb([[btn("⬅️ Guide Management", "guidemgmt")]]) }
+  );
+}
+
+async function sendGuideListMenu(env, chatId, site) {
+  const guides = await getGuides(env);
+  if (!site) {
+    // First tap: choose which site's guides to list (guides only make
+    // sense per-site, since packages are per-site).
+    const rows = GUIDE_SITES.map((s) => [btn(`${SITE_LABELS[s] || s} (${guides.filter((g) => g.site === s).length})`, `guidelist:${s}`)]);
+    rows.push([btn("⬅️ Guide Management", "guidemgmt")]);
+    await tgSendMessage(env, chatId, "👥 <b>Guides</b>\n\nWhich site?", { reply_markup: kb(rows) });
+    return;
+  }
+  const siteGuides = guides.filter((g) => g.site === site);
+  if (!siteGuides.length) {
+    await tgSendMessage(env, chatId, `No guides yet for ${SITE_LABELS[site] || site}.`, {
+      reply_markup: kb([[btn("➕ Add Guide", "addguide")], [btn("⬅️ Guide Management", "guidemgmt")]]),
+    });
+    return;
+  }
+  const rows = siteGuides.map((g) => {
+    const status = !g.chatId ? "⏳" : g.bookingAccess === false ? "🚫" : g.active ? "🟢" : "🔴";
+    return [btn(`${status} ${truncateLabel(g.name)}`, `guidedetail:${g.id}`)];
+  });
+  rows.push([btn("⬅️ Guide Management", "guidemgmt")]);
+  await tgSendMessage(env, chatId, `👥 <b>Guides — ${SITE_LABELS[site] || site}</b>\n\n⏳ = code not redeemed yet · 🟢 Active · 🔴 Not Active · 🚫 Booking access removed`, { reply_markup: kb(rows) });
+}
+
+async function sendGuideDetailMenu(env, chatId, guideId, note) {
+  const guide = await getGuide(env, guideId);
+  if (!guide) return sendGuideManagementMenu(env, chatId, "⚠️ That guide no longer exists.");
+
+  const packages = SITE_PACKAGES[guide.site] || [];
+  const servicesLine = guide.services.includes("all")
+    ? "All Services"
+    : packages.filter((p) => guide.services.includes(p.key)).map((p) => p.label).join(", ") || "(none selected)";
+  const linkLine = guide.chatId ? `Linked ✅ (chat id ${escapeHtml(String(guide.chatId))})` : `⏳ Awaiting code redemption\n<code>${escapeHtml(guide.code || "")}</code>`;
+
+  const text =
+    (note ? note + "\n\n" : "") +
+    `👤 <b>${escapeHtml(guide.name)}</b>\n` +
+    `Site: ${SITE_LABELS[guide.site] || guide.site}\n` +
+    `Services: ${escapeHtml(servicesLine)}\n` +
+    `Status: ${guide.active ? "🟢 Active" : "🔴 Not Active"} · ${guide.bookingAccess === false ? "🚫 Booking access removed" : "✅ Booking access OK"}\n` +
+    `${linkLine}`;
+
+  const rows = [
+    [btn(guide.active ? "🔴 Set Not Active" : "🟢 Set Active", `guidetoggleactive:${guide.id}`)],
+    [btn(guide.bookingAccess === false ? "✅ Restore Booking Access" : "🚫 Remove Booking Access", `guidetoggleaccess:${guide.id}`)],
+    [btn("📋 View Bookings", `guidebookings:${guide.id}`)],
+    [btn("🔑 Regenerate Code", `guideregencode:${guide.id}`)],
+    [btn("🗑 Remove Guide", `guideremove:${guide.id}`)],
+    [btn("⬅️ Back", `guidelist:${guide.site}`)],
+  ];
+  await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+async function toggleGuideActiveFromAdmin(env, chatId, guideId) {
+  const guide = await getGuide(env, guideId);
+  if (!guide) return sendGuideManagementMenu(env, chatId, "⚠️ That guide no longer exists.");
+  await setGuideActive(env, guideId, !guide.active);
+  await sendGuideDetailMenu(env, chatId, guideId);
+}
+
+async function toggleGuideAccessFromAdmin(env, chatId, guideId) {
+  const guide = await getGuide(env, guideId);
+  if (!guide) return sendGuideManagementMenu(env, chatId, "⚠️ That guide no longer exists.");
+  await setGuideBookingAccess(env, guideId, guide.bookingAccess === false); // flips false->true, true/undefined->false
+  await sendGuideDetailMenu(env, chatId, guideId);
+}
+
+async function regenGuideCodeFromAdmin(env, chatId, guideId) {
+  const code = await regenerateGuideCode(env, guideId);
+  if (!code) return sendGuideManagementMenu(env, chatId, "⚠️ That guide no longer exists.");
+  await sendGuideDetailMenu(env, chatId, guideId, `🔑 New code: <code>${code}</code> (expires in 7 days, works once — their old code, if any, no longer works)`);
+}
+
+async function removeGuideFromAdmin(env, chatId, guideId) {
+  const guide = await getGuide(env, guideId);
+  await removeGuideRecord(env, guideId);
+  await sendGuideListMenu(env, chatId, guide ? guide.site : null);
+}
+
+async function sendGuideBookingsForAdmin(env, chatId, guideId) {
+  const guide = await getGuide(env, guideId);
+  if (!guide) return sendGuideManagementMenu(env, chatId, "⚠️ That guide no longer exists.");
+  const ids = (await getGuideBookingIds(env, guideId)).slice(-15).reverse();
+  if (!ids.length) {
+    await tgSendMessage(env, chatId, `${escapeHtml(guide.name)} has no bookings assigned yet.`, {
+      reply_markup: kb([[btn("⬅️ Back", `guidedetail:${guideId}`)]]),
+    });
+    return;
+  }
+  const lines = await Promise.all(
+    ids.map(async (id) => {
+      const status = (await env.BOOKINGS.get(`status:${id}`)) || "pending";
+      return `• <code>${escapeHtml(id)}</code> — ${escapeHtml(status)}`;
+    })
+  );
+  await tgSendMessage(env, chatId, `📋 <b>${escapeHtml(guide.name)}'s recent bookings</b>\n\n${lines.join("\n")}`, {
+    reply_markup: kb([[btn("⬅️ Back", `guidedetail:${guideId}`)]]),
+  });
+}
+
+// ---------------- GUIDE DASHBOARD (the guide's own menu) ----------------
+
+function guideStatusFooter(guide) {
+  if (guide.bookingAccess === false) return "🚫 Your booking access has been removed by the admin — you can still view existing bookings.";
+  return guide.active ? "🟢 You're Active — eligible for new bookings." : "🔴 You're Not Active — you won't receive new bookings until you switch back on.";
+}
+
+async function sendGuideMenu(env, chatId, guide, note) {
+  const rows = [
+    [btn("📊 Dashboard", "gdash"), btn("📅 Today's Bookings", "gtoday")],
+    [btn("🔜 Future Bookings", "gfuture"), btn("📋 All Bookings", "gall")],
+    [btn("📈 Booking Summary", "gsummary"), btn("📦 My Services", "gservices")],
+    [btn(guide.active ? "🔴 Set Not Active" : "🟢 Set Active", "gtoggleactive")],
+    [btn("👤 My Account", "gaccount")],
+  ];
+  await tgSendMessage(
+    env,
+    chatId,
+    (note ? note + "\n\n" : "") + `👋 <b>${escapeHtml(guide.name)}</b>\n${guideStatusFooter(guide)}`,
+    { reply_markup: kb(rows) }
+  );
+}
+
+async function guideBookingBuckets(env, guideId) {
+  const ids = await getGuideBookingIds(env, guideId);
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const buckets = { today: [], future: [], all: ids, completed: [], remaining: [] };
+  for (const id of ids) {
+    const [statusRaw, bookingRaw, completedRaw] = await Promise.all([
+      env.BOOKINGS.get(`status:${id}`),
+      env.BOOKINGS.get(`booking:${id}`),
+      env.BOOKINGS.get(`completed:${id}`),
+    ]);
+    const status = statusRaw || "pending";
+    const booking = bookingRaw ? JSON.parse(bookingRaw) : null;
+    const date = booking?.data?.date || null;
+    const isCompleted = completedRaw === "1";
+    if (date === todayStr) buckets.today.push(id);
+    if (date && date > todayStr) buckets.future.push(id);
+    if (isCompleted) buckets.completed.push(id);
+    else if (status === "confirmed") buckets.remaining.push(id);
+  }
+  return buckets;
+}
+
+async function sendGuideBookingList(env, chatId, guide, ids, title) {
+  if (!ids.length) {
+    await tgSendMessage(env, chatId, `${title}\n\nNothing here right now.`, { reply_markup: kb([[btn("⬅️ Back", "gdash")]]) });
+    return;
+  }
+  const rows = await Promise.all(
+    ids.slice(-20).reverse().map(async (id) => {
+      const status = (await env.BOOKINGS.get(`status:${id}`)) || "pending";
+      return [btn(`${statusEmoji(status)} ${id}`, `gbooking:${id}`)];
+    })
+  );
+  rows.push([btn("⬅️ Back", "gdash")]);
+  await tgSendMessage(env, chatId, title, { reply_markup: kb(rows) });
+}
+
+function statusEmoji(status) {
+  if (status === "confirmed") return "✅";
+  if (status === "cancelled") return "❌";
+  return "⏳";
+}
+
+function fmtBookingData(data) {
+  return Object.entries(data || {})
+    .filter(([k, v]) => v !== undefined && v !== null && v !== "" && k !== "message")
+    .map(([k, v]) => `<b>${escapeHtml(k)}:</b> ${escapeHtml(String(v))}`)
+    .join("\n");
+}
+
+async function sendGuideBookingDetail(env, chatId, guide, bookingId) {
+  const bookingRaw = await env.BOOKINGS.get(`booking:${bookingId}`);
+  const status = (await env.BOOKINGS.get(`status:${bookingId}`)) || "pending";
+  const completed = (await env.BOOKINGS.get(`completed:${bookingId}`)) === "1";
+  if (!bookingRaw) {
+    await tgSendMessage(env, chatId, "That booking's details are no longer available.", { reply_markup: kb([[btn("⬅️ Back", "gdash")]]) });
+    return;
+  }
+  const booking = JSON.parse(bookingRaw);
+  const text = `📋 <b>Booking ${escapeHtml(bookingId)}</b>\n\nStatus: ${statusEmoji(status)} ${escapeHtml(status)}${completed ? " · ✅ Completed" : ""}\n\n${fmtBookingData(booking.data)}`;
+  const rows = [];
+  if (status === "confirmed" && !completed) rows.push([btn("✅ Mark Completed", `gcomplete:${bookingId}`)]);
+  rows.push([btn("⬅️ Back", "gdash")]);
+  await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+async function markGuideBookingCompleted(env, chatId, guide, bookingId) {
+  await env.BOOKINGS.put(`completed:${bookingId}`, "1", { expirationTtl: 60 * 60 * 24 * 120 });
+  await sendGuideBookingDetail(env, chatId, guide, bookingId);
+}
+
+async function sendGuideSummary(env, chatId, guide) {
+  const buckets = await guideBookingBuckets(env, guide.id);
+  const text =
+    `📈 <b>Booking Summary — ${escapeHtml(guide.name)}</b>\n\n` +
+    `Total assigned: <b>${buckets.all.length}</b>\n` +
+    `📅 Today: <b>${buckets.today.length}</b>\n` +
+    `🔜 Future: <b>${buckets.future.length}</b>\n` +
+    `✅ Completed: <b>${buckets.completed.length}</b>\n` +
+    `⏳ Remaining (confirmed, not yet completed): <b>${buckets.remaining.length}</b>`;
+  await tgSendMessage(env, chatId, text, { reply_markup: kb([[btn("⬅️ Back", "gdash")]]) });
+}
+
+async function sendGuideServices(env, chatId, guide) {
+  const packages = SITE_PACKAGES[guide.site] || [];
+  const servicesLine = guide.services.includes("all")
+    ? "All Services"
+    : packages.filter((p) => guide.services.includes(p.key)).map((p) => p.label).join("\n") || "(none — ask admin to assign you a service)";
+  await tgSendMessage(env, chatId, `📦 <b>My Services</b>\n\n${servicesLine}\n\n<i>Only the admin can change this — ask them if it needs updating.</i>`, {
+    reply_markup: kb([[btn("⬅️ Back", "gdash")]]),
+  });
+}
+
+async function sendGuideAccount(env, chatId, guide) {
+  const text =
+    `👤 <b>My Account</b>\n\n` +
+    `Name: ${escapeHtml(guide.name)}\n` +
+    `Site: ${SITE_LABELS[guide.site] || guide.site}\n` +
+    `Linked: ${guide.linkedAt ? new Date(guide.linkedAt).toLocaleDateString() : "—"}\n` +
+    `${guideStatusFooter(guide)}`;
+  await tgSendMessage(env, chatId, text, { reply_markup: kb([[btn("⬅️ Back", "gdash")]]) });
+}
+
+async function toggleGuideActiveFromSelf(env, chatId, guide) {
+  const updated = await setGuideActive(env, guide.id, !guide.active);
+  await sendGuideMenu(env, chatId, updated);
+}
+
+// Dispatches every button a linked guide can tap. Kept entirely
+// separate from handleCallback (the admin dispatcher) — a guide should
+// never be one typo away from reaching a content-editing menu.
+async function handleGuideCallback(env, chatId, guide, data) {
+  const [action, rest] = [data.split(":")[0], data.split(":").slice(1).join(":")];
+  const buckets = ["gdash", "gtoday", "gfuture", "gall"].includes(action) ? await guideBookingBuckets(env, guide.id) : null;
+
+  if (action === "gdash") {
+    const b = buckets;
+    await tgSendMessage(
+      env,
+      chatId,
+      `📊 <b>Dashboard</b>\n\n📅 Today: <b>${b.today.length}</b>\n🔜 Upcoming: <b>${b.future.length}</b>\n✅ Completed: <b>${b.completed.length}</b>\n⏳ Remaining: <b>${b.remaining.length}</b>`,
+      { reply_markup: kb([[btn("📅 Today", "gtoday"), btn("🔜 Upcoming", "gfuture")], [btn("✅ Completed", "gcompletedlist"), btn("⏳ Remaining", "gremaining")], [btn("⬅️ Main Menu", "gmenu")]]) }
+    );
+    return;
+  }
+  if (action === "gmenu") return sendGuideMenu(env, chatId, guide);
+  if (action === "gtoday") return sendGuideBookingList(env, chatId, guide, buckets.today, "📅 <b>Today's Bookings</b>");
+  if (action === "gfuture") return sendGuideBookingList(env, chatId, guide, buckets.future, "🔜 <b>Future Bookings</b>");
+  if (action === "gall") return sendGuideBookingList(env, chatId, guide, buckets.all, "📋 <b>All Bookings</b>");
+  if (action === "gcompletedlist") {
+    const b = await guideBookingBuckets(env, guide.id);
+    return sendGuideBookingList(env, chatId, guide, b.completed, "✅ <b>Completed</b>");
+  }
+  if (action === "gremaining") {
+    const b = await guideBookingBuckets(env, guide.id);
+    return sendGuideBookingList(env, chatId, guide, b.remaining, "⏳ <b>Remaining</b>");
+  }
+  if (action === "gsummary") return sendGuideSummary(env, chatId, guide);
+  if (action === "gservices") return sendGuideServices(env, chatId, guide);
+  if (action === "gaccount") return sendGuideAccount(env, chatId, guide);
+  if (action === "gtoggleactive") return toggleGuideActiveFromSelf(env, chatId, guide);
+  if (action === "gbooking") return sendGuideBookingDetail(env, chatId, guide, rest);
+  if (action === "gcomplete") return markGuideBookingCompleted(env, chatId, guide, rest);
+
+  await sendGuideMenu(env, chatId, guide);
 }
 
 async function sendStatsMenu(env, chatId) {
@@ -499,9 +798,22 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "bgpick") return sendSitePicker(env, chatId, "bgshortcut", SITES);
   if (action === "secpick") return sendSitePicker(env, chatId, "secshortcut", SITES);
   if (action === "herobtnpick") return sendSitePicker(env, chatId, "herobtnshortcut", SITES);
-  if (action === "gencode") return generateAccessCode(env, chatId);
-  if (action === "vidpick") return sendSitePicker(env, chatId, "vidupload", SITES);  if (action === "guides") return sendGuidesMenu(env, chatId);
-  if (action === "guiderm") return removeGuide(env, chatId, rest.join(":"));
+  if (action === "vidpick") return sendSitePicker(env, chatId, "vidupload", SITES);
+
+  if (action === "herobtnreset") return resetHeroButtonToDefault(env, chatId, rest.join(":"));
+  if (action === "guidemgmt") return sendGuideManagementMenu(env, chatId);
+  if (action === "addguide") return startAddGuide(env, chatId);
+  if (action === "addguidesite") return chooseAddGuideSite(env, chatId, rest.join(":"));
+  if (action === "addguidesvc") return toggleAddGuideService(env, chatId, rest.join(":"));
+  if (action === "addguideall") return finishAddGuide(env, chatId, true);
+  if (action === "addguidedone") return finishAddGuide(env, chatId, false);
+  if (action === "guidelist") return sendGuideListMenu(env, chatId, rest.join(":") || null);
+  if (action === "guidedetail") return sendGuideDetailMenu(env, chatId, rest.join(":"));
+  if (action === "guidetoggleactive") return toggleGuideActiveFromAdmin(env, chatId, rest.join(":"));
+  if (action === "guidetoggleaccess") return toggleGuideAccessFromAdmin(env, chatId, rest.join(":"));
+  if (action === "guideregencode") return regenGuideCodeFromAdmin(env, chatId, rest.join(":"));
+  if (action === "guideremove") return removeGuideFromAdmin(env, chatId, rest.join(":"));
+  if (action === "guidebookings") return sendGuideBookingsForAdmin(env, chatId, rest.join(":"));
 
   if (action === "pick") {
     const kind = rest[0];
@@ -526,7 +838,20 @@ async function handleCallback(env, chatId, messageId, data) {
     const [kind, site] = rest;
     if (kind === "vidupload") return startVideoUpload(env, chatId, site);
     const startPath = SHORTCUT_START_PATHS[kind];
-    if (startPath) return openTree(env, chatId, { kind: "content", site, path: [...startPath] });
+    if (startPath) {
+      await openTree(env, chatId, { kind: "content", site, path: [...startPath] });
+      if (kind === "herobtnshortcut") {
+        // A dedicated, narrowly-scoped reset — only the four hero
+        // BUTTON fields (label/link/target), never the rest of hero
+        // (badge/title/video/etc.) and never CONTENT.nav.items, which
+        // lives at a completely different top-level key and this never
+        // touches. See resetHeroButtonToDefault below.
+        await tgSendMessage(env, chatId, "Just the hero button, not the nav menu:", {
+          reply_markup: kb([[btn("🔄 Reset Hero Button to Default", `herobtnreset:${site}`)]]),
+        });
+      }
+      return;
+    }
     return openTree(env, chatId, { kind, site, path: [] });
   }
 
@@ -772,6 +1097,26 @@ async function toggleBoolean(env, chatId, key) {
 // dedicated one-off session (not tied to the generic content tree),
 // since a video upload isn't editing one leaf value, it's replacing a
 // whole file and re-pointing background.global.videoUrl at it.
+// Resets ONLY the hero button's four fields (label, link, and whichever
+// target field this site uses) back to schema defaults — deletes them
+// from the content override doc entirely so they fall back to
+// content-schema.js's defaults naturally, same as any other field reset
+// to default. Never touches the rest of `hero` (badge/title/video/etc)
+// and never touches CONTENT.nav.items, which lives at a completely
+// separate top-level key this function never reads or writes.
+async function resetHeroButtonToDefault(env, chatId, site) {
+  const override = await getDoc(env, `content:${site}`, {});
+  const HERO_BUTTON_KEYS = ["hero.bookNowLabel", "hero.bookNowLink", "hero.bookNowTargetId", "hero.bookNowTargetPage"];
+  for (const path of HERO_BUTTON_KEYS) deletePath(override, path);
+  await saveDoc(env, `content:${site}`, override, { logChange: "Hero button reset to default" });
+  await tgSendMessage(
+    env,
+    chatId,
+    `✅ Hero button reset to default on ${SITE_LABELS[site] || site} — label, link, and destination are all back to the site's original values. Nothing else (including the nav menu) was touched.`,
+    { reply_markup: kb([[btn("🔘 Hero Button (text & link)", "herobtnpick")], [btn("⬅️ Main Menu", "home")]]) }
+  );
+}
+
 async function startVideoUpload(env, chatId, site) {
   await setSession(env, chatId, { awaiting: { type: "video", site } });
   await tgSendMessage(
@@ -858,6 +1203,19 @@ async function handleAwaitedInput(env, chatId, session, msg) {
     await tgSendMessage(env, chatId, "✅ ERA AI learned that answer! It'll use it next time this question comes up.", {
       reply_markup: kb([[btn("⬅️ Back to ERA AI", "eraai")]]),
     });
+    return;
+  }
+
+  if (awaiting.type === "guidename") {
+    const name = (msg.text ?? "").trim();
+    if (!name) {
+      await tgSendMessage(env, chatId, "Please send a name as plain text, or tap Cancel.", { reply_markup: kb([[btn("❌ Cancel", "guidemgmt")]]) });
+      return;
+    }
+    await setSession(env, chatId, { addGuide: { name } });
+    const rows = GUIDE_SITES.map((s) => [btn(SITE_LABELS[s] || s, `addguidesite:${s}`)]);
+    rows.push([btn("❌ Cancel", "guidemgmt")]);
+    await tgSendMessage(env, chatId, `Which site is <b>${escapeHtml(name)}</b> a guide for?`, { reply_markup: kb(rows) });
     return;
   }
 

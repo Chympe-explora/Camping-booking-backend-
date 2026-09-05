@@ -130,16 +130,24 @@ export const SCHEMA_DEFAULTS = {
             "name": "Krem Chympe Waterfall & Cave",
             "image": "Cave Entrance Falls.jpg",
             "description": "Book a guided package tour to Krem Chympe. A forest trek from Khaddum Village leads to the Chympe (Pieltleng) Waterfall and into the Krem Chympe cave system \u2014 one of Meghalaya's longest, with underground pools, golden mineral formations, and rare cave wildlife.",
-            "buttonLabel": "Book Now",
-            "link": "krem-chympe/index.html"
+            "buttonLabel": "Explore Destination",
+            "link": "krem-chympe/index.html",
+            "navOptions": [
+              { "label": "📦 Packages", "url": "krem-chympe/index.html?page=2" },
+              { "label": "🏠 Krem Chympe Home Page", "url": "krem-chympe/index.html" }
+            ]
           },
           {
             "id": "wilderness-expedition",
             "name": "Wilderness Expedition",
             "image": "Trek Trail Mist.jpg",
             "description": "Book the 6-day Wilderness Expedition \u2014 a multi-day journey deep into Meghalaya's backcountry, trekking to waterfalls and landscapes most visitors never reach, with camping along the way.",
-            "buttonLabel": "Book Now",
-            "link": "wilderness-expedition/index.html"
+            "buttonLabel": "Explore Destination",
+            "link": "wilderness-expedition/index.html",
+            "navOptions": [
+              { "label": "📝 Booking Form", "url": "wilderness-expedition/index.html?page=3" },
+              { "label": "🏠 Wilderness Home Page", "url": "wilderness-expedition/index.html" }
+            ]
           }
         ]
       },

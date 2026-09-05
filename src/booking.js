@@ -31,7 +31,7 @@
 
 import { bumpVisitors, bumpBookings } from "./stats.js";
 import { isSessionActive, isSessionBlocked, toggleSessionBlocked } from "./conversations.js";
-import { getGuides } from "./telegram-bot.js";
+import { pickGuideForBooking, assignBookingToGuide } from "./guides.js";
 
 export function corsHeaders(env) {
   return {
@@ -261,35 +261,13 @@ export async function handleReceipt(request, env) {
   return json({ ok: !!res.ok, error: res.ok ? undefined : (res.description || "telegram send failed") }, env, res.ok ? 200 : 502);
 }
 
-// Recipients for a booking message: the main group chat, PLUS every
-// guide who has redeemed a "🔑 Generate Access Code" (see
-// telegram-bot.js) — each guide gets their own personal copy, in their
-// own DM with the bot, with working Confirm/Reject buttons. Whichever
-// copy gets tapped first resolves the booking everywhere (see
-// broadcastEdit in handleBookingCallback below), so two guides can
-// never accidentally confirm and reject the same booking.
-async function recipientChatIds(env) {
-  const ids = [];
-  if (env.TELEGRAM_CHAT_ID) ids.push(String(env.TELEGRAM_CHAT_ID));
-  try {
-    const guides = await getGuides(env);
-    for (const g of guides) {
-      const id = String(g.userId);
-      if (!ids.includes(id)) ids.push(id);
-    }
-  } catch (e) {
-    /* guide list unavailable — booking still reaches the main group */
-  }
-  return ids;
-}
-
 // Sends one booking (text + Confirm/Reject buttons, optionally with a
 // receipt photo/doc) to a single chat id, handling the same three
 // shapes handleSubmit always has: receipt fits in the caption, receipt
 // too long for a caption (sent separately, details+buttons follow), or
-// no receipt at all. Returns the send result for that chat id's main
-// (buttoned) message specifically, so the caller can track message ids
-// per recipient for later edits.
+// no receipt at all. Pass replyMarkup: null for an informational-only
+// copy with no buttons at all (used for the group's copy when a guide
+// has already been assigned the actionable one — see handleSubmit).
 async function sendBookingToOne(env, chatId, text, replyMarkup, receipt, silent) {
   if (receipt && text.length <= 1024) {
     return receipt.isImage
@@ -303,13 +281,14 @@ async function sendBookingToOne(env, chatId, text, replyMarkup, receipt, silent)
       : tgSendDocumentByIdWithButtons(env, receipt.fileId, shortCaption, undefined, silent, chatId)
     ).catch(() => {});
   }
-  return tg(env, "sendMessage", { chat_id: chatId, parse_mode: "HTML", text, reply_markup: replyMarkup, disable_notification: !!silent });
+  return tg(env, "sendMessage", { chat_id: chatId, parse_mode: "HTML", text, reply_markup: replyMarkup || undefined, disable_notification: !!silent });
 }
 
 // A submitted booking gets its own bookingId (used by the browser to poll
-// status) and its own Telegram message with inline Confirm/Reject buttons.
-// The bookingId <-> Telegram message id mapping and the full booking data
-// are both cached in KV; Telegram remains the durable, readable log.
+// status) and its own Telegram message(s) with inline Confirm/Reject
+// buttons. The bookingId <-> Telegram message id mapping and the full
+// booking data are both cached in KV; Telegram remains the durable,
+// readable log.
 export async function handleSubmit(request, env, ctx) {
   const { sessionId, siteId, data } = await request.json();
 
@@ -357,16 +336,16 @@ export async function handleSubmit(request, env, ctx) {
     : fmtData(data);
   const text = `${bodyText}\n\n<i>ref: ${bookingId}</i>`;
 
-  const replyMarkup = {
+  const actionableMarkup = {
     inline_keyboard: [
       [
         { text: "\u2705 Confirm", callback_data: `confirm:${bookingId}` },
         { text: "\u274c Reject", callback_data: `cancel:${bookingId}` },
       ],
-      // Lets the admin remove this specific visitor's chat id from ever
-      // sending a booking notification here again, right from the
-      // booking itself — no need to dig up their conversation thread
-      // first. See handleBookingCallback's "blockvisitor" case below.
+      // Lets whoever's handling this remove this specific visitor's
+      // chat id from ever sending a booking notification again, right
+      // from the booking itself. See handleBookingCallback's
+      // "blockvisitor" case below.
       [{ text: "\ud83d\udeab Block This Chat ID From Booking", callback_data: `blockvisitor:${bookingId}` }],
     ],
   };
@@ -374,66 +353,80 @@ export async function handleSubmit(request, env, ctx) {
   // If this visitor is currently marked 🟢 Active from Telegram (see
   // conversations.js), an admin already has eyes on them directly, so
   // this booking message is sent silently (no notification sound/badge)
-  // instead of being skipped outright — it still lands everywhere (main
-  // group + every guide's DM) with working Confirm/Reject buttons, it
-  // just doesn't interrupt anyone. When not active, this behaves
-  // exactly as it always has.
+  // instead of being skipped outright — it still lands with working
+  // Confirm/Reject buttons, it just doesn't interrupt anyone. When not
+  // active, this behaves exactly as it always has.
   const activeElsewhere = sessionId ? await isSessionActive(env, sessionId) : false;
 
   // If this visitor already uploaded a payment receipt (during the Pay
   // Now step), re-attach that SAME Telegram file (no re-upload) to this
-  // booking message so the guide sees the receipt and the Confirm/Reject
-  // buttons together, in one place.
+  // booking message so whoever handles it sees the receipt and the
+  // Confirm/Reject buttons together, in one place.
   const receiptRaw = sessionId ? await env.BOOKINGS.get(`receiptfile:${sessionId}`) : null;
   const receipt = receiptRaw ? JSON.parse(receiptRaw) : null;
 
-  const recipients = await recipientChatIds(env);
-  if (recipients.length === 0) {
-    return json({ ok: false, error: "No Telegram chat is configured to receive bookings." }, env, 502);
-  }
+  // ---- who gets the actionable message? ----
+  // Package-based random assignment (see guides.js): if there's at
+  // least one active, booking-access-enabled, linked guide who covers
+  // this site + package, ONE of them is chosen at random and gets the
+  // actionable Confirm/Reject message. The admin group still gets a
+  // copy, but purely informational (no buttons) — it's told who has
+  // it, nothing more. If no eligible guide exists, the group falls
+  // back to being the actionable recipient, exactly like before guides
+  // existed at all. Guides can receive unlimited bookings — there's no
+  // per-guide cap here by design.
+  const packageKey = data && data.packageKey;
+  const assignedGuide = siteId ? await pickGuideForBooking(env, siteId, packageKey) : null;
 
-  // The FIRST recipient (the main group) is the one whose success/
-  // failure actually gets reported back to the visitor — same
-  // correctness bar as before this feature existed. The rest (each
-  // guide's personal DM) are supplementary copies: if one guide has
-  // blocked the bot or never actually started a chat with it, that
-  // shouldn't fail the whole booking for everyone else.
-  const primaryRes = await sendBookingToOne(env, recipients[0], text, replyMarkup, receipt, activeElsewhere);
+  let primaryRes;
+  let groupInfoText = null;
+  if (assignedGuide) {
+    primaryRes = await sendBookingToOne(env, assignedGuide.chatId, text, actionableMarkup, receipt, activeElsewhere);
+    groupInfoText = `\u2139\ufe0f <b>New booking</b> — assigned to <b>${escapeHtml(assignedGuide.name)}</b> for confirmation.\n\n${text}`;
+  } else {
+    if (!env.TELEGRAM_CHAT_ID) {
+      return json({ ok: false, error: "No Telegram chat is configured to receive bookings." }, env, 502);
+    }
+    primaryRes = await sendBookingToOne(env, env.TELEGRAM_CHAT_ID, text, actionableMarkup, receipt, activeElsewhere);
+  }
 
   // IMPORTANT: only report success to the visitor's browser if the
   // booking message actually reached Telegram. Previously this always
   // returned { ok: true }, even when the send failed (bad/missing bot
   // token, wrong chat id, bot never started, etc.) — so a visitor could
-  // "successfully" submit a booking that the admin never saw, with no
-  // error anywhere. Now a failed send is reported back as an error so it
-  // can be surfaced in the UI instead of disappearing silently.
+  // "successfully" submit a booking that nobody ever saw, with no error
+  // anywhere. Now a failed send is reported back as an error so it can
+  // be surfaced in the UI instead of disappearing silently.
   if (!primaryRes.ok) {
     return json({ ok: false, error: primaryRes.description || "telegram send failed" }, env, 502);
   }
 
   const messageRefs = [];
+  const actionableChatId = assignedGuide ? assignedGuide.chatId : env.TELEGRAM_CHAT_ID;
   if (primaryRes.result && primaryRes.result.message_id) {
-    messageRefs.push({ chatId: recipients[0], messageId: primaryRes.result.message_id });
+    messageRefs.push({ chatId: actionableChatId, messageId: primaryRes.result.message_id });
   }
 
   // SPEED + reliability: the visitor already has everything they need
-  // (bookingId), so neither the guide DM fan-out nor the KV bookkeeping
-  // needs to finish before responding. Deferred via ctx.waitUntil when
-  // available.
-  async function sendToGuidesAndPersist() {
-    const guideResults = await Promise.all(
-      recipients.slice(1).map((chatId) =>
-        sendBookingToOne(env, chatId, text, replyMarkup, receipt, activeElsewhere).catch(() => null)
-      )
-    );
-    guideResults.forEach((res, i) => {
-      if (res && res.ok && res.result && res.result.message_id) {
-        messageRefs.push({ chatId: recipients[i + 1], messageId: res.result.message_id });
-      }
-    });
+  // (bookingId), so neither the group's informational copy nor the KV
+  // bookkeeping needs to finish before responding. Deferred via
+  // ctx.waitUntil when available.
+  async function sendInfoAndPersist() {
+    if (assignedGuide && env.TELEGRAM_CHAT_ID && groupInfoText) {
+      // Informational only — no reply_markup at all, per spec: the
+      // group never gets actionable buttons once a guide is handling it.
+      await sendBookingToOne(env, env.TELEGRAM_CHAT_ID, groupInfoText, null, receipt, true).catch(() => {});
+    }
+    if (assignedGuide) {
+      await assignBookingToGuide(env, assignedGuide.id, bookingId);
+    }
 
     await env.BOOKINGS.put(`status:${bookingId}`, "pending", { expirationTtl: 60 * 60 * 24 * 30 });
-    await env.BOOKINGS.put(`booking:${bookingId}`, JSON.stringify({ sessionId, siteId, data }), { expirationTtl: 60 * 60 * 24 * 30 });
+    await env.BOOKINGS.put(
+      `booking:${bookingId}`,
+      JSON.stringify({ sessionId, siteId, data, assignedGuideId: assignedGuide ? assignedGuide.id : null }),
+      { expirationTtl: 60 * 60 * 24 * 30 }
+    );
     if (messageRefs.length) {
       await env.BOOKINGS.put(`bookingmsg:${bookingId}`, JSON.stringify(messageRefs), { expirationTtl: 60 * 60 * 24 * 30 });
     }
@@ -444,9 +437,9 @@ export async function handleSubmit(request, env, ctx) {
   }
 
   if (ctx && typeof ctx.waitUntil === "function") {
-    ctx.waitUntil(sendToGuidesAndPersist());
+    ctx.waitUntil(sendInfoAndPersist());
   } else {
-    await sendToGuidesAndPersist();
+    await sendInfoAndPersist();
   }
 
   return json({ ok: true, bookingId }, env);
