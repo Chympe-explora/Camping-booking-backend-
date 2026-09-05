@@ -25,37 +25,37 @@ export const SCHEMA_DEFAULTS = {
         "hero": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         },
         "destinations": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         },
         "experiences": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         },
         "booking": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         },
         "about": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         },
         "ratings": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         },
         "footer": {
           "background": { "type": "transparent", "opacity": 100 },
           "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false },
-          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }
+          "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" }
         }
       },
       "nav": {
@@ -1264,13 +1264,13 @@ export const SCHEMA_DEFAULTS = {
         }
       },
       "sectionStyles": {
-        "1": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "2": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "3": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "4": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "5": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "6": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "7": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } }
+        "1": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "2": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "3": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "4": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "5": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "6": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "7": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } }
       },
       "notice": {
         "enabled": false,
@@ -2224,13 +2224,13 @@ export const SCHEMA_DEFAULTS = {
         }
       },
       "sectionStyles": {
-        "1": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "2": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "3": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "4": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "5": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "6": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } },
-        "7": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 } }
+        "1": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "2": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "3": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "4": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "5": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "6": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } },
+        "7": { "background": { "type": "transparent", "opacity": 100 }, "overlay": { "enabled": false, "color": "#000000", "opacity": 30, "gradient": false }, "glass": { "enabled": false, "opacity": 20, "blur": 12, "borderOpacity": 20, "borderRadius": 24 }, "typography": { "headingSize": "", "headingColor": "", "bodySize": "", "bodyColor": "" } }
       },
       "notice": {
         "enabled": false,

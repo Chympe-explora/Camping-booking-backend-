@@ -16,6 +16,7 @@ import { SITES, SITE_LABELS, getDoc, saveDoc, deepMerge, getPath, setPath, delet
 import { listChildren, humanize, chunk } from "./walker.js";
 import { DEFAULT_DISCOUNTS } from "./pricing.js";
 import { tg, tgSendMessage, tgAnswerCallbackQuery, kb, btn } from "./telegram.js";
+import { helpButton, handleHelpCallback, smallRows } from "./help.js";
 import { getLiveStats, resetStats } from "./stats.js";
 import { getEraStatusText, listUnanswered, teachAnswer, discardUnanswered, setLearningEnabled, parseQABlob, teachBulkAnswers, addAdminNotes } from "./era-ai.js";
 import { getConversation, getConversationByShortId, setConversationStatus, toggleConversationActive, toggleSessionBlocked, resolveTelegramMessage, pushOutbox, statusLabel } from "./conversations.js";
@@ -190,21 +191,23 @@ export async function handleTelegramAdminUpdate(env, update) {
 // ---------------- MAIN MENU ----------------
 
 async function sendMainMenu(env, chatId, note) {
-  const rows = CATEGORIES.map((c) => [btn(c.label, `pick:${c.kind}`)]);
-  // Quick-access shortcuts straight into the two new config trees added
-  // for the background-video/section-styling upgrade — same underlying
-  // data as "✏️ Edit Website Text" (background / sectionStyles live
-  // inside KC_CONTENT), just jumping past the top-level menu so admins
-  // don't have to know those keys exist to find them.
-  rows.push([btn("🎬 Background Manager", "bgpick")]);
-  rows.push([btn("🧱 Section Styling", "secpick")]);
-  rows.push([btn("🔘 Hero Button (text & link)", "herobtnpick")]);
-  rows.push([btn("📹 Upload Background Video", "vidpick")]);
-  rows.push([btn("🧭 Guide Management", "guidemgmt")]);
-  rows.push([btn("🤖 ERA AI Assistant", "eraai")]);
-  rows.push([btn("👁️ Preview Live Sites", "preview")]);
-  rows.push([btn("📊 Live Stats", "stats")]);
+  // Small buttons, 2 per row, instead of one giant column — keeps the
+  // menu compact even as more categories get added later.
+  const items = [
+    ...CATEGORIES.map((c) => btn(c.label, `pick:${c.kind}`)),
+    btn("🎬 Background", "bgpick"),
+    btn("🧱 Sections", "secpick"),
+    btn("🔘 Hero Button", "herobtnpick"),
+    btn("📹 BG Video", "vidpick"),
+    btn("🔤 Fonts & Colors", "fontpick"),
+    btn("🧭 Guides", "guidemgmt"),
+    btn("🤖 ERA AI", "eraai"),
+    btn("👁️ Preview", "preview"),
+    btn("📊 Stats", "stats"),
+  ];
+  const rows = smallRows(items, 2);
   rows.push([btn("🧨 Reset EVERYTHING to default", "resetworld")]);
+  rows.push([helpButton("mainmenu", "❓ Help")]);
   const text =
     (note ? note + "\n\n" : "") +
     "👑 <b>Website Admin</b>\nWhat do you want to do?";
@@ -216,8 +219,8 @@ async function sendMainMenu(env, chatId, note) {
 async function sendGuideManagementMenu(env, chatId, note) {
   const guides = await getGuides(env);
   const rows = [
-    [btn("➕ Add Guide", "addguide")],
-    [btn(`👥 Guides (${guides.length})`, "guidelist")],
+    [btn("➕ Add Guide", "addguide"), helpButton("addguide")],
+    [btn(`👥 Guides (${guides.length})`, "guidelist"), helpButton("guidemgmt")],
     [btn("⬅️ Main Menu", "home")],
   ];
   await tgSendMessage(
@@ -231,7 +234,7 @@ async function sendGuideManagementMenu(env, chatId, note) {
 async function startAddGuide(env, chatId) {
   await setSession(env, chatId, { awaiting: { type: "guidename" } });
   await tgSendMessage(env, chatId, "➕ <b>Add Guide</b>\n\nWhat's this guide's name? Send it as a plain message.", {
-    reply_markup: kb([[btn("❌ Cancel", "guidemgmt")]]),
+    reply_markup: kb([[btn("❌ Cancel", "guidemgmt"), helpButton("addguide", "❓ How It Works")]]),
   });
 }
 
@@ -330,14 +333,31 @@ async function sendGuideDetailMenu(env, chatId, guideId, note) {
     `${linkLine}`;
 
   const rows = [
-    [btn(guide.active ? "🔴 Set Not Active" : "🟢 Set Active", `guidetoggleactive:${guide.id}`)],
-    [btn(guide.bookingAccess === false ? "✅ Restore Booking Access" : "🚫 Remove Booking Access", `guidetoggleaccess:${guide.id}`)],
+    [btn(guide.active ? "🔴 Set Not Active" : "🟢 Set Active", `guidetoggleactive:${guide.id}`), helpButton("guidetoggleactive")],
+    [btn(guide.bookingAccess === false ? "✅ Restore Access" : "🚫 Remove Access", `guidetoggleaccess:${guide.id}`), helpButton("guidetoggleaccess")],
     [btn("📋 View Bookings", `guidebookings:${guide.id}`)],
-    [btn("🔑 Regenerate Code", `guideregencode:${guide.id}`)],
-    [btn("🗑 Remove Guide", `guideremove:${guide.id}`)],
+    [btn("🔑 Regenerate Code", `guideregencode:${guide.id}`), helpButton("guideregencode")],
+    [btn("🗑 Remove Guide", `guideremove:${guide.id}`), helpButton("guideremove")],
     [btn("⬅️ Back", `guidelist:${guide.site}`)],
   ];
   await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+// Destructive — never fire immediately (spec: confirm before anything
+// that can't be trivially undone). This just shows the warning screen;
+// removeGuideFromAdmin (below) does the actual delete, only reached via
+// "guideremoveconfirm".
+async function confirmRemoveGuide(env, chatId, guideId) {
+  const guide = await getGuide(env, guideId);
+  if (!guide) return sendGuideManagementMenu(env, chatId, "⚠️ That guide no longer exists.");
+  const text =
+    `⚠️ <b>CONFIRM ACTION</b>\n\nYou are about to permanently remove:\n\n👤 ${escapeHtml(guide.name)} — ${SITE_LABELS[guide.site] || guide.site}\n\n` +
+    `This cannot be undone. Their code will stop working immediately.`;
+  await tgSendMessage(env, chatId, text, {
+    reply_markup: kb([
+      [btn("✅ Confirm Remove", `guideremoveconfirm:${guide.id}`), btn("❌ Cancel", `guidedetail:${guide.id}`)],
+    ]),
+  });
 }
 
 async function toggleGuideActiveFromAdmin(env, chatId, guideId) {
@@ -563,7 +583,7 @@ async function sendStatsMenu(env, chatId) {
     `📊 <b>Live Stats</b>\n👀 Visitors: <b>${visitors}</b>\n✅ Confirmed bookings: <b>${bookings}</b>\n\n` +
     `This is also kept as a pinned message at the top of this chat, updating automatically as visits and confirmations come in.`;
   await tgSendMessage(env, chatId, text, {
-    reply_markup: kb([[btn("🔄 Reset counters to 0", "resetstats")], [btn("⬅️ Main Menu", "home")]]),
+    reply_markup: kb([[btn("🔄 Reset counters to 0", "resetstats"), helpButton("stats")], [btn("⬅️ Main Menu", "home")]]),
   });
 }
 
@@ -588,7 +608,7 @@ async function sendEraMenu(env, chatId) {
   const rows = [
     [btn("📚 Bulk Teach Q&A", "erabulk")],
     [btn(status.learningEnabled ? "⏸️ Stop Learning" : "▶️ Resume Learning", "eratogglelearn")],
-    [btn(`📋 Questions to Answer (${status.pendingCount})`, "erapending")],
+    [btn(`📋 Questions to Answer (${status.pendingCount})`, "erapending"), helpButton("eraai")],
     [btn("⬅️ Main Menu", "home")],
   ];
   await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
@@ -801,6 +821,41 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "vidpick") return sendSitePicker(env, chatId, "vidupload", SITES);
 
   if (action === "herobtnreset") return resetHeroButtonToDefault(env, chatId, rest.join(":"));
+  // ---- 🔤 Fonts & Colors (heading/body size + color, per page/section) ----
+  if (action === "fontpick") return sendSitePicker(env, chatId, "fontsite", SITES);
+  if (action === "fontsection") {
+    const [site, key] = rest;
+    return sendFontFieldMenu(env, chatId, site, key);
+  }
+  if (action === "fontsize") {
+    const [site, key, which] = rest;
+    return sendFontSizePicker(env, chatId, site, key, which);
+  }
+  if (action === "fontcolor") {
+    const [site, key, which] = rest;
+    return sendFontColorPicker(env, chatId, site, key, which);
+  }
+  if (action === "fontsetsize") {
+    const [site, key, which, ...valueParts] = rest;
+    return applyFontValue(env, chatId, site, key, `${which}Size`, valueParts.join(":"));
+  }
+  if (action === "fontsetcolor") {
+    const [site, key, which, ...valueParts] = rest;
+    return applyFontValue(env, chatId, site, key, `${which}Color`, valueParts.join(":"));
+  }
+  if (action === "fontcustomsize") {
+    const [site, key, which] = rest;
+    return startFontCustomInput(env, chatId, site, key, which, "size");
+  }
+  if (action === "fontcustomcolor") {
+    const [site, key, which] = rest;
+    return startFontCustomInput(env, chatId, site, key, which, "color");
+  }
+  if (action === "fontresetsec") {
+    const [site, key] = rest;
+    return resetFontSection(env, chatId, site, key);
+  }
+
   if (action === "guidemgmt") return sendGuideManagementMenu(env, chatId);
   if (action === "addguide") return startAddGuide(env, chatId);
   if (action === "addguidesite") return chooseAddGuideSite(env, chatId, rest.join(":"));
@@ -812,7 +867,10 @@ async function handleCallback(env, chatId, messageId, data) {
   if (action === "guidetoggleactive") return toggleGuideActiveFromAdmin(env, chatId, rest.join(":"));
   if (action === "guidetoggleaccess") return toggleGuideAccessFromAdmin(env, chatId, rest.join(":"));
   if (action === "guideregencode") return regenGuideCodeFromAdmin(env, chatId, rest.join(":"));
-  if (action === "guideremove") return removeGuideFromAdmin(env, chatId, rest.join(":"));
+  if (action === "guideremove") return confirmRemoveGuide(env, chatId, rest.join(":"));
+  if (action === "guideremoveconfirm") return removeGuideFromAdmin(env, chatId, rest.join(":"));
+  if (action === "bhelp") return handleHelpCallback(env, chatId, messageId, rest.join(":"));
+  if (action === "noop") return;
   if (action === "guidebookings") return sendGuideBookingsForAdmin(env, chatId, rest.join(":"));
 
   if (action === "pick") {
@@ -836,6 +894,7 @@ async function handleCallback(env, chatId, messageId, data) {
 
   if (action === "site") {
     const [kind, site] = rest;
+    if (kind === "fontsite") return sendFontSectionPicker(env, chatId, site);
     if (kind === "vidupload") return startVideoUpload(env, chatId, site);
     const startPath = SHORTCUT_START_PATHS[kind];
     if (startPath) {
@@ -949,6 +1008,174 @@ async function sendSitePicker(env, chatId, kind, sites) {
   const rows = sites.map((s) => [btn(SITE_LABELS[s] || s, `site:${kind}:${s}`)]);
   rows.push([btn("⬅️ Back", "home")]);
   await tgSendMessage(env, chatId, "Which part of the website?", { reply_markup: kb(rows) });
+}
+
+// ---------------- 🔤 FONTS & COLORS ----------------
+// Per-page/per-section heading & body font size + color, saved into
+// the same content:<site> doc the rest of the site's text lives in
+// (path: sectionStyles.<key>.typography.*) — the live site applies it
+// via typography-system.js (see that file for the CSS it generates).
+// A blank value just means "leave the normal styling alone", so a
+// half-configured section never breaks anything.
+
+// Which sections/pages exist per site, and a friendly label for each.
+// "root" is one continuously-scrolling homepage, so its sectionStyles
+// keys are named page SECTIONS. krem-chympe / wilderness-expedition
+// are each a small multi-screen app, so their keys are page NUMBERS
+// (see the "Page 1: Home" ... "Page 7: Refund Policy" comments in
+// their app.js) — same underlying mechanism either way.
+const FONT_SECTIONS = {
+  root: [
+    ["hero", "🎯 Hero"],
+    ["destinations", "🗺️ Destinations"],
+    ["experiences", "🌟 Experiences"],
+    ["booking", "📋 Why Book Us"],
+    ["about", "ℹ️ About"],
+    ["ratings", "⭐ Ratings"],
+    ["footer", "🔻 Footer"],
+  ],
+  "krem-chympe": [
+    ["1", "🏠 Home"],
+    ["2", "📦 Packages & Gallery"],
+    ["3", "📝 Booking Form"],
+    ["4", "💰 Pricing"],
+    ["5", "💳 Payment"],
+    ["6", "✅ Booking Status"],
+    ["7", "↩️ Refund Policy"],
+  ],
+  "wilderness-expedition": [
+    ["1", "🏠 Home"],
+    ["2", "📦 Packages & Gallery"],
+    ["3", "📝 Booking Form"],
+    ["4", "💰 Pricing"],
+    ["5", "💳 Payment"],
+    ["6", "✅ Booking Status"],
+    ["7", "↩️ Refund Policy"],
+  ],
+};
+
+const FONT_SIZE_PRESETS = {
+  heading: [
+    ["Small", "1.5rem"],
+    ["Medium", "2rem"],
+    ["Large", "2.5rem"],
+    ["XL", "3rem"],
+  ],
+  body: [
+    ["Small", "0.875rem"],
+    ["Medium", "1rem"],
+    ["Large", "1.125rem"],
+    ["XL", "1.25rem"],
+  ],
+};
+
+const FONT_COLOR_PRESETS = [
+  ["⚪ White", "#ffffff"],
+  ["⚫ Black", "#000000"],
+  ["🟢 Brand Green", "#2E8B57"],
+  ["🟡 Gold", "#FFD700"],
+  ["🔵 Sky", "#38BDF8"],
+  ["🔴 Red", "#EF4444"],
+];
+
+const FONT_SIZE_RE = /^[0-9]{1,4}(\.[0-9]{1,3})?(px|rem|em|%)$/;
+const FONT_COLOR_RE = /^(#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?|rgba?\([\d\s,.]+\)|[a-zA-Z]{3,20})$/;
+
+function fontSectionLabel(site, key) {
+  const found = (FONT_SECTIONS[site] || []).find(([k]) => k === key);
+  return found ? found[1] : key;
+}
+
+async function sendFontSectionPicker(env, chatId, site) {
+  const sections = FONT_SECTIONS[site] || [];
+  const rows = smallRows(
+    sections.map(([key, label]) => btn(label, `fontsection:${site}:${key}`)),
+    2
+  );
+  rows.push([helpButton("fontmenu", "❓ Help"), btn("⬅️ Back", "fontpick")]);
+  await tgSendMessage(env, chatId, `🔤 <b>Fonts & Colors — ${SITE_LABELS[site] || site}</b>\n\nWhich page/section?`, { reply_markup: kb(rows) });
+}
+
+async function sendFontFieldMenu(env, chatId, site, key, note) {
+  const { merged } = await loadMerged(env, "content", site);
+  const typo = getPath(merged, `sectionStyles.${key}.typography`) || {};
+  const val = (v) => (v ? v : "<i>default</i>");
+  const text =
+    (note ? note + "\n\n" : "") +
+    `🔤 <b>${fontSectionLabel(site, key)}</b> — ${SITE_LABELS[site] || site}\n\n` +
+    `Heading size: ${val(typo.headingSize)}\n` +
+    `Heading color: ${val(typo.headingColor)}\n` +
+    `Body size: ${val(typo.bodySize)}\n` +
+    `Body color: ${val(typo.bodyColor)}`;
+  const rows = [
+    [btn("🔠 Heading Size", `fontsize:${site}:${key}:heading`), helpButton("fontheadingsize")],
+    [btn("🎨 Heading Color", `fontcolor:${site}:${key}:heading`), helpButton("fontheadingcolor")],
+    [btn("🔡 Body Size", `fontsize:${site}:${key}:body`), helpButton("fontbodysize")],
+    [btn("🎨 Body Color", `fontcolor:${site}:${key}:body`), helpButton("fontbodycolor")],
+    [btn("↩️ Reset to Default", `fontresetsec:${site}:${key}`)],
+    [btn("⬅️ Back", `site:fontsite:${site}`)],
+  ];
+  await tgSendMessage(env, chatId, text, { reply_markup: kb(rows) });
+}
+
+async function sendFontSizePicker(env, chatId, site, key, which) {
+  const presets = FONT_SIZE_PRESETS[which] || FONT_SIZE_PRESETS.body;
+  const rows = smallRows(
+    presets.map(([label, value]) => btn(label, `fontsetsize:${site}:${key}:${which}:${value}`)),
+    2
+  );
+  rows.push([btn("✏️ Custom Size", `fontcustomsize:${site}:${key}:${which}`)]);
+  rows.push([helpButton(which === "heading" ? "fontheadingsize" : "fontbodysize", "❓ How It Works")]);
+  rows.push([btn("⬅️ Back", `fontsection:${site}:${key}`)]);
+  await tgSendMessage(
+    env,
+    chatId,
+    `🔠 <b>${which === "heading" ? "Heading" : "Body"} Font Size</b>\n${fontSectionLabel(site, key)} — ${SITE_LABELS[site] || site}\n\nPick a preset, or send a custom size.`,
+    { reply_markup: kb(rows) }
+  );
+}
+
+async function sendFontColorPicker(env, chatId, site, key, which) {
+  const rows = smallRows(
+    FONT_COLOR_PRESETS.map(([label, value]) => btn(label, `fontsetcolor:${site}:${key}:${which}:${value}`)),
+    2
+  );
+  rows.push([btn("✏️ Custom Color (hex)", `fontcustomcolor:${site}:${key}:${which}`)]);
+  rows.push([helpButton(which === "heading" ? "fontheadingcolor" : "fontbodycolor", "❓ How It Works")]);
+  rows.push([btn("⬅️ Back", `fontsection:${site}:${key}`)]);
+  await tgSendMessage(
+    env,
+    chatId,
+    `🎨 <b>${which === "heading" ? "Heading" : "Body"} Font Color</b>\n${fontSectionLabel(site, key)} — ${SITE_LABELS[site] || site}\n\nPick a preset, or send a custom hex color.`,
+    { reply_markup: kb(rows) }
+  );
+}
+
+async function applyFontValue(env, chatId, site, key, field, value) {
+  const docKey = docKeyFor("content", site);
+  const override = await getDoc(env, docKey, {});
+  setPath(override, `sectionStyles.${key}.typography.${field}`, value);
+  await saveDoc(env, docKey, override, { logChange: `Font ${field} for ${site}/${key} → ${value}` });
+  await sendFontFieldMenu(env, chatId, site, key, "✅ Saved!");
+}
+
+async function startFontCustomInput(env, chatId, site, key, which, kind) {
+  await setSession(env, chatId, { awaiting: { type: `font${kind}`, site, key, which } });
+  const prompt =
+    kind === "size"
+      ? `Send a custom ${which} font size — e.g. <code>2rem</code>, <code>24px</code>, or <code>150%</code>.`
+      : `Send a custom ${which} font color as a hex code — e.g. <code>#38bdf8</code>.`;
+  await tgSendMessage(env, chatId, prompt, {
+    reply_markup: kb([[btn("❌ Cancel", `font${kind}:${site}:${key}:${which}`)]]),
+  });
+}
+
+async function resetFontSection(env, chatId, site, key) {
+  const docKey = docKeyFor("content", site);
+  const override = await getDoc(env, docKey, {});
+  setPath(override, `sectionStyles.${key}.typography`, { headingSize: "", headingColor: "", bodySize: "", bodyColor: "" });
+  await saveDoc(env, docKey, override, { logChange: `Reset fonts for ${site}/${key}` });
+  await sendFontFieldMenu(env, chatId, site, key, "↩️ Reset to default styling.");
 }
 
 async function sendPreviewLinks(env, chatId) {
@@ -1204,6 +1431,26 @@ async function handleAwaitedInput(env, chatId, session, msg) {
       reply_markup: kb([[btn("⬅️ Back to ERA AI", "eraai")]]),
     });
     return;
+  }
+
+  if (awaiting.type === "fontsize" || awaiting.type === "fontcolor") {
+    const text = (msg.text ?? "").trim();
+    const { site, key, which } = awaiting;
+    const isSize = awaiting.type === "fontsize";
+    const re = isSize ? FONT_SIZE_RE : FONT_COLOR_RE;
+    if (!re.test(text)) {
+      await tgSendMessage(
+        env,
+        chatId,
+        isSize
+          ? `That doesn't look like a valid size. Use a number plus a unit — e.g. <code>2rem</code>, <code>24px</code>, <code>150%</code>. Try again, or tap Cancel.`
+          : `That doesn't look like a valid color. Use a hex code — e.g. <code>#38bdf8</code>. Try again, or tap Cancel.`,
+        { reply_markup: kb([[btn("❌ Cancel", `font${isSize ? "size" : "color"}:${site}:${key}:${which}`)]]) }
+      );
+      return;
+    }
+    await clearSession(env, chatId);
+    return applyFontValue(env, chatId, site, key, `${which}${isSize ? "Size" : "Color"}`, text);
   }
 
   if (awaiting.type === "guidename") {
